@@ -118,7 +118,11 @@ class Store:
     def db(self) -> sqlite3.Connection:
         if self._db is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._db = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+            # check_same_thread=False: работы идут в отдельных потоках, и итог
+            # пишет тот поток, который её делал. Сам sqlite3 в CPython собран
+            # сериализованным, а запись у нас короткая и редкая.
+            self._db = sqlite3.connect(self.path, timeout=30, isolation_level=None,
+                                       check_same_thread=False)
             self._db.row_factory = sqlite3.Row
             self._db.execute("PRAGMA journal_mode=WAL")
             self._db.execute("PRAGMA foreign_keys=ON")
