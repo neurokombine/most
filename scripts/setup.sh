@@ -20,21 +20,38 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME="default"
-WITH_VOICE=0
+WITH_VOICE=-1          # -1 = «решай по памяти машины», 0 = без голоса, 1 = с голосом
 PROJECTS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --voice) WITH_VOICE=1 ;;
+    --no-voice|--bez-golosa) WITH_VOICE=0 ;;
     --projects)
       shift
       [ $# -gt 0 ] || { echo "[установка] после --projects нужен путь к папке с проектами"; exit 1; }
       PROJECTS="$1" ;;
     --projects=*) PROJECTS="${1#--projects=}" ;;
-    -*) echo "[установка] не знаю довода $1 — знаю только --voice и --projects <папка>"; exit 1 ;;
+    -*) echo "[установка] не знаю довода $1 — знаю --voice, --no-voice и --projects <папка>"; exit 1 ;;
     *) NAME="$1" ;;
   esac
   shift
 done
+
+# Голос по умолчанию — да, если машина его тянет. Решение 3 плана и приёмка
+# 15.09: человек, которому мост сказал «понимаю голосовое», а потом «повторите
+# текстом», считает это поломкой, и он прав. Порог живёт в scripts/pamyat.py.
+if [ "$WITH_VOICE" = "-1" ]; then
+  if python3 "$(dirname "$0")/pamyat.py" --tiho 2>/dev/null; then
+    WITH_VOICE=1
+    echo "[установка] голос ставлю: памяти на машине хватает ($(python3 "$(dirname "$0")/pamyat.py" 2>/dev/null | sed 's/память машины: //'))"
+  else
+    WITH_VOICE=0
+    echo "[установка] голос НЕ ставлю: на этой машине памяти маловато."
+    echo "            Это не поломка: голосовые мост честно попросит повторить текстом,"
+    echo "            а всё остальное работает как обычно. Скажите об этом человеку."
+    echo "            Захочет всё равно — bash scripts/setup.sh $NAME --voice"
+  fi
+fi
 
 case "$NAME" in
   *[!A-Za-z0-9_-]*)
@@ -193,7 +210,7 @@ echo "  2. проверьте:  .venv/bin/python -m bridge --name $NAME doctor"
 echo "  3. автозапуск: sudo bash scripts/install-service.sh $NAME"
 if [ "$WITH_VOICE" != "1" ]; then
   echo
-  echo "Голос (расшифровка голосовых и ответ вслух) ставится отдельно:"
+  echo "Голос не ставился. Если он всё-таки нужен:"
   echo "  bash scripts/setup.sh $NAME --voice"
-  echo "  На машине с 4 ГБ памяти он впритык: слух занимает до 800 МБ."
+  echo "  На машине с 4 ГБ памяти он впритык: слух занимает 620–970 МБ."
 fi
