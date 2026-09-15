@@ -52,17 +52,21 @@ if [ ! -f "$RUN_HOME/.most/$NAME/config.yaml" ]; then
   exit 1
 fi
 
+# Проверяем ДО того, как что-то положить в системную папку: иначе на машине
+# остаётся служба, которая ищет мост не там, где он лежит, а первой строкой
+# вывода было бы «положил службу» — и отчёт получился бы бодрее правды.
+if [ "$ROOT" != "$RUN_HOME/most" ]; then
+  echo "[автозапуск] Мост лежит в $ROOT, а служба будет искать его в $RUN_HOME/most."
+  echo "             Перенесите папку моста в $RUN_HOME/most и запустите меня снова."
+  echo "             Ничего в систему я не клала."
+  exit 1
+fi
+
 UNIT="/etc/systemd/system/most@.service"
 sed -e "s|REPLACE_USER|$RUN_USER|g" -e "s|REPLACE_HOME|$RUN_HOME|g" \
     "$ROOT/systemd/most@.service" > "$UNIT"
 chmod 644 "$UNIT"
 echo "[автозапуск] положил службу: $UNIT (работает от $RUN_USER, папка $RUN_HOME/most)"
-
-if [ "$ROOT" != "$RUN_HOME/most" ]; then
-  echo "[автозапуск] ⚠️  мост лежит в $ROOT, а служба ищет его в $RUN_HOME/most."
-  echo "             Перенесите папку моста в $RUN_HOME/most и запустите меня снова."
-  exit 1
-fi
 
 systemctl daemon-reload
 systemctl enable --now "most@$NAME"
