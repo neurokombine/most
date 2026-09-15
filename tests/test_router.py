@@ -579,3 +579,24 @@ def test_a_file_only_promised_is_not_remembered(router):
     later = router.handle(tg("отдай"), receiver=receiver)
     assert receiver.sent_files == []
     assert "пришли" in "\n".join(later).lower()
+
+
+def test_the_token_never_reaches_the_journal(router, store, config):
+    """Сеть любит вписать в ошибку полный адрес запроса, а в нём — токен."""
+    make_file(router, "смета.pdf")
+    receiver = FakeReceiver()
+    receiver.send_file = _refuse(RuntimeError(
+        f"HTTPSConnectionPool: /bot{config.telegram.token}/sendDocument"))
+    answers = router.handle(tg("пришли мне смету"), receiver=receiver)
+
+    written = "\n".join(str(row["text"]) for row in store.recent_journal())
+    assert config.telegram.token not in written
+    assert "***" in written
+    assert config.telegram.token not in "\n".join(answers)
+
+
+def test_the_token_never_reaches_the_journal_when_taking_a_file(router, store, config):
+    receiver = FakeReceiver(trouble=RuntimeError(f"bot{config.telegram.token} упал"))
+    router.handle(with_file(), receiver=receiver)
+    written = "\n".join(str(row["text"]) for row in store.recent_journal())
+    assert config.telegram.token not in written

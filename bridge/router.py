@@ -24,7 +24,7 @@ from pathlib import Path
 
 from . import changes, narrator, postman, texts
 from .executor import Executor
-from .receivers.base import FileTooBig, Incoming
+from .receivers.base import FileTooBig, Incoming, mask
 from .works import WorkPool
 
 MOSCOW = timezone(timedelta(hours=3))
@@ -118,6 +118,15 @@ class Router:
         self.postbox = postbox
         self.pool = pool or WorkPool(executor=executor, store=store,
                                      max_parallel=getattr(config, "parallel", 1))
+
+    def _mask(self, text) -> str:
+        """Ни один текст беды не уходит в журнал с токеном внутри.
+
+        Сеть любит подставить в ошибку полный адрес запроса, а в нём у Telegram
+        живёт токен бота. Журнал ученик показывает нейросети, а иногда и чужому
+        человеку, — значит, чистим до записи, а не после.
+        """
+        return mask(text, self.config.secrets() if hasattr(self.config, "secrets") else [])
 
     # --- папки проектов -----------------------------------------------------
 
@@ -340,7 +349,7 @@ class Router:
                 continue
             except Exception as exc:               # noqa: BLE001
                 self.store.note("error", channel=incoming.channel,
-                                chat_id=incoming.chat_id, text=str(exc)[:200])
+                                chat_id=incoming.chat_id, text=self._mask(exc)[:200])
                 said.append(texts.FILE_NOT_TAKEN.format(name=name))
                 continue
 
@@ -424,7 +433,8 @@ class Router:
                     size=postman.human_size(too_big.size or postman.size_of(path)),
                     limit=postman.human_size(too_big.limit), path=path)
             except Exception as exc:                # noqa: BLE001
-                self.store.note("error", channel=incoming.channel, text=str(exc)[:200])
+                self.store.note("error", channel=incoming.channel,
+                                text=self._mask(exc)[:200])
             return texts.FILE_NOT_SENT.format(path=path)
 
         if receiver is None:
@@ -439,7 +449,7 @@ class Router:
                 path=path)
         except Exception as exc:                    # noqa: BLE001
             self.store.note("error", channel=incoming.channel, chat_id=incoming.chat_id,
-                            text=str(exc)[:200])
+                            text=self._mask(exc)[:200])
             return texts.FILE_NOT_SENT.format(path=path)
         return ""                                   # файл ушёл, подпись при нём
 
