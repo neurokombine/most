@@ -59,8 +59,8 @@ class VoiceConfig:
     max_seconds: int = voice.MAX_SECONDS
     max_chars: int = voice.MAX_SPEAK_CHARS
     # Через сколько минут простоя отпустить модель слуха. 0 — не отпускать
-    # никогда. Замер 15.09: с моделью в памяти мост держит 550 МБ вместо 37,
-    # а поднимается она обратно около двух секунд — на это и меняем.
+    # никогда. Замер 15.09: с моделью в памяти мост держит 530 МБ, без неё
+    # 160, а поднимается она обратно около четырёх секунд — на это и меняем.
     unload_after_min: int = 30
     model_dir: Path = field(default_factory=lambda: DEFAULT_ROOT / "models" / "faster-whisper")
     voices_dir: Path = field(default_factory=lambda: DEFAULT_ROOT / "voices")

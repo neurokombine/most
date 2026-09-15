@@ -292,6 +292,44 @@ def test_zero_means_never_let_it_go(tmp_path):
     assert ears._model is not None
 
 
+def test_the_memory_goes_back_to_the_system_not_just_to_python(tmp_path):
+    """Сборщик мусора вернул пятую часть, `malloc_trim` — остальное.
+
+    Замер на сервере 15.09: 528 МБ до отпускания, 423 после `gc.collect()`
+    и 160 после `malloc_trim`. Без этого вызова обещание «память вернулась»
+    было бы почти неправдой.
+    """
+    from bridge.voice import WhisperTranscriber
+
+    ears = WhisperTranscriber(loader=подъёмник([]))
+    ears.transcribe(tmp_path / "raz.ogg")
+
+    позвали = []
+
+    class Libc:
+        def malloc_trim(self, сколько):
+            позвали.append(сколько)
+
+    import bridge.voice as voice_module
+    было = voice_module.vernut_pamyat
+    voice_module.vernut_pamyat = lambda loader=None: было(loader=lambda: Libc())
+    try:
+        assert ears.release() is True
+    finally:
+        voice_module.vernut_pamyat = было
+    assert позвали == [0]
+
+
+def test_a_machine_without_malloc_trim_does_not_break(tmp_path):
+    """Макбук и musl-контейнеры этого вызова не знают — и это не беда."""
+    from bridge.voice import vernut_pamyat
+
+    def нет_такого():
+        raise OSError("libc.so.6: cannot open shared object file")
+
+    assert vernut_pamyat(loader=нет_такого) is False
+
+
 def test_there_is_nothing_to_let_go_when_the_voice_is_not_set_up():
     from bridge.voice import Transcriber
 
