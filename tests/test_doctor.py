@@ -1,5 +1,6 @@
 """Доктор: заготовка этапа 6 — токен и сеть. Сети в тестах нет."""
-from bridge.doctor import Check, check_claude, check_config, check_network, checkup
+from bridge.doctor import (Check, check_claude, check_config, check_network,
+                           check_voice, checkup)
 from tests.fakes import FakeResponse, FakeSession
 
 
@@ -62,3 +63,43 @@ def test_empty_token_is_named_plainly_without_touching_the_network():
     assert check.ok is False
     assert "не вписан" in check.what
     assert session.calls == []          # в сеть за этим ходить незачем
+
+
+# --- этап 4: голос ----------------------------------------------------------
+
+def test_voice_check_says_it_is_off_when_switched_off(config):
+    config.voice.enabled = False
+    check = check_voice(config)
+    assert check.ok is True
+    assert "выключ" in check.what
+
+
+def test_voice_check_is_calm_without_the_library(config, tmp_path):
+    """Библиотеки нет — это не поломка: мост работает текстом и так и говорит."""
+    config.voice.model_dir = tmp_path / "models"
+    check = check_voice(config, library=False)
+    assert check.ok is True
+    assert "текстом" in check.what or "текстом" in (check.hint or "")
+
+
+def test_voice_check_catches_a_missing_model(config, tmp_path):
+    config.voice.model_dir = tmp_path / "models"
+    check = check_voice(config, library=True)
+    assert check.ok is False
+    assert "--voice" in (check.hint or "")
+
+
+def test_voice_check_is_happy_when_the_model_is_on_disk(config, tmp_path):
+    folder = tmp_path / "models" / "models--Systran--faster-whisper-small" / "snapshots" / "a"
+    folder.mkdir(parents=True)
+    (folder / "model.bin").write_bytes(b"x")
+    config.voice.model_dir = tmp_path / "models"
+    check = check_voice(config, library=True)
+    assert check.ok is True
+    assert "small" in check.what
+
+
+def test_checkup_includes_the_voice(config):
+    checks = checkup(config, session=FakeSession([FakeResponse(200, {"ok": True})]),
+                     claude_bin="/nen/sushchestvuet/claude")
+    assert any("голос" in c.what.lower() for c in checks)

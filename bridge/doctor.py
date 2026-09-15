@@ -15,7 +15,7 @@ from pathlib import Path
 
 import requests
 
-from . import texts
+from . import texts, voice
 from .executor import clean_env, resolve_claude_bin
 from .receivers.base import mask
 from .receivers.max import BASE as MAX_BASE
@@ -81,6 +81,34 @@ def check_claude(claude_bin: str | None = None) -> Check:
     return Check(True, f"нейросеть на месте: {(done.stdout or '').strip()}")
 
 
+def check_voice(config, library=None) -> Check:
+    """Голос: есть ли чем слушать и скачана ли модель.
+
+    Библиотеки нет — это не беда, а выбор: мост работает текстом и на голосовое
+    честно просит повторить словами. А вот «библиотека есть, модели нет» — это
+    полудело: первое же голосовое встанет на несколько минут скачивания, и
+    человек будет сидеть перед молчащим ботом. Такое называем неисправностью.
+    """
+    settings = getattr(config, "voice", None)
+    if settings is None or not settings.enabled:
+        return Check(True, "голос выключен в настройках — мост работает текстом")
+
+    present = voice.library_present() if library is None else bool(library)
+    if not present:
+        return Check(True, "голос не поставлен: голосовые мост попросит повторить текстом",
+                     "включить: bash scripts/setup.sh --voice")
+    if not voice.model_ready(settings.model_dir, settings.model):
+        return Check(False, f"голос поставлен, а модель «{settings.model}» не скачана: "
+                            f"{settings.model_dir}",
+                     "скачайте её заранее: bash scripts/setup.sh --voice "
+                     "(в первом голосовом это минуты ожидания)")
+
+    speaker = voice.PiperSpeaker(voice_name=settings.piper_voice,
+                                 voices_dir=settings.voices_dir)
+    out = "и читает вслух" if speaker.available() else "наружу молчит (piper не поставлен)"
+    return Check(True, f"голос слышит моделью «{settings.model}», {out}")
+
+
 def check_network(channel: str, session=None, token: str = "") -> Check:
     """Живая ли дорога до мессенджера. Токен в текст не попадает никогда."""
     if not (token or "").strip():
@@ -112,7 +140,8 @@ def check_network(channel: str, session=None, token: str = "") -> Check:
 
 def checkup(config, session=None, claude_bin: str | None = None) -> list[Check]:
     """Полный обход. Сессию и путь к claude можно подменить — так его зовут тесты."""
-    checks = [check_config(config), check_projects(config), check_claude(claude_bin)]
+    checks = [check_config(config), check_projects(config), check_claude(claude_bin),
+              check_voice(config)]
     for channel in config.enabled_channels():
         token = getattr(config.channel(channel), "token", "")
         checks.append(check_network(channel, session=session, token=token))
