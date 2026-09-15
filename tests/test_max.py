@@ -1,7 +1,8 @@
 """Приёмник Max: своя схема обновлений (marker, а не update_id), те же три класса ошибок."""
 import pytest
 
-from bridge.receivers.base import BridgeConflict, TokenRejected, RateLimited
+from bridge.receivers.base import (Attachment, BridgeConflict, FileTooBig,
+                                   RateLimited, TokenRejected)
 from bridge.receivers.max import MaxReceiver, CA_BUNDLE
 from tests.fakes import FakeResponse, FakeSession
 
@@ -136,3 +137,171 @@ def test_long_answer_is_sent_at_the_pace_max_allows(store):
     assert len(session.calls) == 3
     assert len(slept) == 2                    # пауза между кусками, не после последнего
     assert all(s >= 0.5 for s in slept)
+
+
+# --- этап 3: файлы туда и обратно -------------------------------------------
+
+def with_file(name="отчёт за сентябрь.xlsx", size=2048, text=""):
+    update = nested_update(text)
+    update["message"]["body"]["attachments"] = [{
+        "type": "file",
+        "payload": {"url": "https://fu.oneme.ru/get/abc", "token": "file-token"},
+        "filename": name, "size": size,
+    }]
+    return update
+
+
+def test_file_attachment_becomes_our_attachment(store):
+    r = make(store, [FakeResponse(200, {"updates": [with_file()], "marker": 1})])
+    msg = r.poll_once()[0]
+    assert len(msg.attachments) == 1
+    att = msg.attachments[0]
+    assert att.kind == "file"
+    assert att.file_name == "отчёт за сентябрь.xlsx"
+    assert att.size == 2048
+    assert att.url == "https://fu.oneme.ru/get/abc"
+    assert att.file_id == "file-token"
+
+
+def test_caption_in_max_becomes_the_task(store):
+    r = make(store, [FakeResponse(200, {"updates": [with_file(text="посчитай итог")],
+                                        "marker": 1})])
+    msg = r.poll_once()[0]
+    assert msg.text == "посчитай итог"
+    assert msg.attachments
+
+
+def test_image_video_audio_are_attachments(store):
+    update = nested_update("")
+    update["message"]["body"]["attachments"] = [
+        {"type": "image", "payload": {"url": "https://iu.oneme.ru/1", "token": "t1",
+                                      "photo_id": 7}},
+        {"type": "video", "payload": {"url": "https://v/2", "token": "t2"}},
+        {"type": "audio", "payload": {"url": "https://a/3", "token": "t3"}},
+    ]
+    r = make(store, [FakeResponse(200, {"updates": [update], "marker": 1})])
+    kinds = [a.kind for a in r.poll_once()[0].attachments]
+    assert kinds == ["photo", "video", "audio"]
+
+
+def test_sticker_and_location_are_not_files(store):
+    update = nested_update("")
+    update["message"]["body"]["attachments"] = [
+        {"type": "sticker", "payload": {"code": "s"}},
+        {"type": "location", "latitude": 1, "longitude": 2},
+    ]
+    r = make(store, [FakeResponse(200, {"updates": [update], "marker": 1})])
+    assert r.poll_once() == []          # сказать нечего и файла нет
+
+
+def test_file_is_downloaded_by_its_own_link(store):
+    session = FakeSession([FakeResponse(200, content=b"body")])
+    r = MaxReceiver(token="max-token", store=store, session=session)
+    data = r.fetch(Attachment(kind="file", file_id="t", url="https://fu.oneme.ru/get/abc",
+                              size=10))
+    assert data == b"body"
+    assert session.calls[0]["url"] == "https://fu.oneme.ru/get/abc"
+
+
+def test_download_retries_with_the_token_when_the_link_asks_for_it(store):
+    session = FakeSession([FakeResponse(401, {"code": "verify.token"}),
+                           FakeResponse(200, content=b"body")])
+    r = MaxReceiver(token="max-token", store=store, session=session)
+    assert r.fetch(Attachment(kind="file", file_id="t", url="https://fu.oneme.ru/x")) == b"body"
+    assert "Authorization" not in (session.calls[0].get("headers") or {})
+    assert session.calls[1]["headers"]["Authorization"] == "max-token"
+
+
+def test_file_without_a_link_is_an_honest_refusal(store):
+    r = MaxReceiver(token="max-token", store=store, session=FakeSession([]))
+    with pytest.raises(RuntimeError):
+        r.fetch(Attachment(kind="file", file_id="t", url=""))
+
+
+def test_too_big_incoming_file_is_refused_before_the_request(store):
+    session = FakeSession([])
+    r = MaxReceiver(token="max-token", store=store, session=session)
+    with pytest.raises(FileTooBig):
+        r.fetch(Attachment(kind="file", url="https://x", size=r.download_limit + 1))
+    assert session.calls == []
+
+
+def upload_responses(message_answers=None):
+    return [
+        FakeResponse(200, {"url": "https://fu.oneme.ru/upload/xyz"}),      # POST /uploads
+        FakeResponse(200, {"token": "uploaded-token"}),                    # multipart
+    ] + list(message_answers or [FakeResponse(200, {"message": {"body": {"mid": "m"}}})])
+
+
+def test_file_goes_out_in_three_steps(store, tmp_path):
+    path = tmp_path / "отчёт за сентябрь.xlsx"
+    path.write_bytes(b"data")
+    session = FakeSession(upload_responses())
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=lambda s: None)
+    r.send_file(900, path, caption="вот он")
+
+    first, second, third = session.calls
+    assert first["url"].endswith("/uploads")
+    assert first["params"]["type"] == "file"
+    assert first["headers"]["Authorization"] == "max-token"
+
+    assert second["url"] == "https://fu.oneme.ru/upload/xyz"
+    assert second["files"]["data"][0] == "отчёт за сентябрь.xlsx"
+    assert "Authorization" not in (second.get("headers") or {})
+
+    assert third["url"].endswith("/messages")
+    assert third["params"]["chat_id"] == 900
+    assert third["json"]["attachments"] == [{"type": "file",
+                                             "payload": {"token": "uploaded-token"}}]
+    assert third["json"]["text"] == "вот он"
+
+
+def test_token_from_the_first_step_is_used_when_the_upload_is_silent(store, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"data")
+    session = FakeSession([
+        FakeResponse(200, {"url": "https://fu.oneme.ru/upload/xyz", "token": "early-token"}),
+        FakeResponse(200, {}),
+        FakeResponse(200, {"message": {}}),
+    ])
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=lambda s: None)
+    r.send_file(900, path)
+    assert session.calls[2]["json"]["attachments"][0]["payload"]["token"] == "early-token"
+
+
+def test_not_ready_file_is_sent_again_after_a_pause(store, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"data")
+    waited = []
+    session = FakeSession(upload_responses([
+        FakeResponse(400, {"code": "attachment.not.ready", "message": "not processed"}),
+        FakeResponse(400, {"code": "attachment.not.ready", "message": "not processed"}),
+        FakeResponse(200, {"message": {"body": {"mid": "m"}}}),
+    ]))
+    r = MaxReceiver(token="max-token", store=store, session=session,
+                    sleeper=lambda seconds: waited.append(seconds))
+    r.send_file(900, path)
+    assert len([c for c in session.calls if c["url"].endswith("/messages")]) == 3
+    assert waited and waited[-1] > waited[0]      # пауза растёт, как просит их документация
+
+
+def test_file_that_never_gets_ready_is_an_honest_error(store, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"data")
+    answers = [FakeResponse(400, {"code": "attachment.not.ready"})] * 20
+    session = FakeSession(upload_responses(answers))
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=lambda s: None)
+    with pytest.raises(RuntimeError) as exc:
+        r.send_file(900, path)
+    assert "max-token" not in str(exc.value)
+
+
+def test_upload_trouble_never_shows_the_token(store, tmp_path):
+    path = tmp_path / "a.txt"
+    path.write_bytes(b"data")
+    session = FakeSession([FakeResponse(401, {"code": "verify.token",
+                                              "message": "max-token bad"})])
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=lambda s: None)
+    with pytest.raises(RuntimeError) as exc:
+        r.send_file(900, path)
+    assert "max-token" not in str(exc.value)

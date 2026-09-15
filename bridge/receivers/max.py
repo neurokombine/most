@@ -20,13 +20,30 @@ from pathlib import Path
 import requests
 
 from ..narrator import MAX_LIMIT, chunk
-from .base import BridgeConflict, Incoming, RateLimited, Receiver, TokenRejected, mask
+from .base import (Attachment, BridgeConflict, FileTooBig, Incoming, RateLimited,
+                   Receiver, TokenRejected, mask)
 
 BASE = "https://platform-api2.max.ru"
 LONG_POLL_TIMEOUT = 25
 MARKER_KEY = "max_marker"
 MESSAGE_UPDATES = ("message_created", "comment_created")
 SEND_PAUSE = 0.6        # два сообщения в секунду в один чат — предел Max
+
+# Файлы. Max отдаёт ссылку на присланное сразу в самом обновлении — второго
+# запроса, как `getFile` у Telegram, здесь нет.
+FILE_KINDS = {"file": "file", "image": "photo", "video": "video", "audio": "audio"}
+FILE_TIMEOUT = 300
+# Их документация обещает для типа `file` до 4 ГБ, но гигабайты через себя мост
+# не гоняет: на ученической машине это память, время и молчащий бот. Свой
+# потолок держим на четверти гигабайта и говорим человеку путь на сервере.
+UPLOAD_LIMIT = 250 * 1024 * 1024
+DOWNLOAD_LIMIT = 50 * 1024 * 1024        # тоже наш потолок: их предела в документации нет
+# «Файл ещё обрабатывается»: сообщение ушло раньше, чем их сторона дожевала
+# загрузку. Документация просит подождать и повторить с растущей паузой.
+NOT_READY = "attachment.not.ready"
+UPLOAD_SETTLE = 1.0                      # пауза после загрузки, до первой попытки
+NOT_READY_TRIES = 6
+NOT_READY_STEP = 2.0
 
 _BUNDLE = Path(__file__).resolve().parent.parent.parent / "certs" / "max_ca_bundle.pem"
 CA_BUNDLE = str(_BUNDLE) if _BUNDLE.exists() else True
@@ -35,6 +52,8 @@ CA_BUNDLE = str(_BUNDLE) if _BUNDLE.exists() else True
 class MaxReceiver(Receiver):
     channel = "max"
     limit = MAX_LIMIT
+    download_limit = DOWNLOAD_LIMIT
+    upload_limit = UPLOAD_LIMIT
 
     def __init__(self, token: str, store, session=None, long_poll_timeout: int = LONG_POLL_TIMEOUT,
                  verify=CA_BUNDLE, sleeper=time.sleep):
@@ -116,9 +135,11 @@ class MaxReceiver(Receiver):
         sender = message.get("sender") or update.get("user") or {}
         recipient = message.get("recipient") or {}
 
+        attachments = _attachments(body.get("attachments") or update.get("attachments"))
+        # Подпись к файлу — это задание про него, а не просто текст рядом.
         text = (body.get("text") or update.get("text") or "").strip()
-        if not text:
-            return None                                       # вложения — следующие этапы
+        if not text and not attachments:
+            return None                                       # голосовые — этап 4
 
         chat_id = recipient.get("chat_id") or update.get("chat_id")
         user_id = sender.get("user_id") or recipient.get("user_id")
@@ -132,7 +153,96 @@ class MaxReceiver(Receiver):
             text=text,
             thread_id=0,                                      # тем в личке Max нет
             raw=update,
+            attachments=attachments,
         )
+
+
+    # --- файлы --------------------------------------------------------------
+
+    def fetch(self, attachment: Attachment) -> bytes:
+        """Скачивает присланное по ссылке из самого обновления.
+
+        Ссылка ведёт на их файловый узел (`fu.oneme.ru` и соседи), а не на
+        platform-api2, и токен ему обычно не нужен. Но если он его всё-таки
+        спросит — отдаём, а не сдаёмся: документация об этом молчит.
+        """
+        if attachment.size and attachment.size > self.download_limit:
+            raise FileTooBig("файл больше, чем мост тянет через Max",
+                             size=attachment.size, limit=self.download_limit)
+        if not attachment.url:
+            raise RuntimeError("Max не дал ссылки на этот файл")
+
+        resp = self.session.get(attachment.url, verify=self.verify, timeout=FILE_TIMEOUT)
+        if resp.status_code in (401, 403):
+            resp = self.session.get(attachment.url, headers=self.headers,
+                                    verify=self.verify, timeout=FILE_TIMEOUT)
+        if resp.status_code >= 400:
+            raise RuntimeError(f"не смог забрать файл: код {resp.status_code}")
+        return resp.content
+
+    def send_file(self, chat_id: int, path, caption: str = "") -> None:
+        """Три шага Max: попросить место → залить → сослаться на токен.
+
+        Снимок уходит типом `file`, а не `image`: картинкой его пережмут,
+        а человек просил файл.
+        """
+        path = Path(path)
+        size = path.stat().st_size
+        if size > self.upload_limit:
+            raise FileTooBig("файл больше, чем мост отправляет через Max",
+                             size=size, limit=self.upload_limit)
+
+        place = self._ask_for_a_place()
+        token = self._upload(place.get("url") or "", path) or place.get("token")
+        if not token:
+            raise RuntimeError("Max не вернул метку загруженного файла")
+
+        self.sleep(UPLOAD_SETTLE)     # их сторона дожёвывает файл — дадим ей секунду
+        self._send_with_attachment(chat_id, token, caption)
+
+    def _ask_for_a_place(self) -> dict:
+        resp = self.session.post(BASE + "/uploads", params={"type": "file"},
+                                 headers=self.headers, verify=self.verify, timeout=60)
+        data = _json_of(resp)
+        if resp.status_code >= 400 or not (data.get("url") or data.get("token")):
+            raise RuntimeError("Max не дал места под файл: "
+                               + self._mask(_trouble(resp, data)))
+        return data
+
+    def _upload(self, url: str, path: Path) -> str:
+        if not url:
+            return ""
+        with open(path, "rb") as body:
+            # Поле формы называется `data` — так в их примере и в рабочем коде;
+            # токена в этот запрос не кладём, это уже не platform-api2.
+            resp = self.session.post(url, files={"data": (path.name, body)},
+                                     verify=self.verify, timeout=FILE_TIMEOUT)
+        data = _json_of(resp)
+        if resp.status_code >= 400:
+            raise RuntimeError("не смог залить файл в Max: "
+                               + self._mask(_trouble(resp, data)))
+        return str(data.get("token") or "")
+
+    def _send_with_attachment(self, chat_id: int, token: str, caption: str) -> None:
+        body = {"attachments": [{"type": "file", "payload": {"token": token}}]}
+        if caption:
+            body["text"] = caption[:self.limit]
+
+        for attempt in range(1, NOT_READY_TRIES + 1):
+            resp = self.session.post(BASE + "/messages", params={"chat_id": chat_id},
+                                     json=body, headers=self.headers,
+                                     verify=self.verify, timeout=FILE_TIMEOUT)
+            data = _json_of(resp)
+            if resp.status_code < 400 and data.get("code") != NOT_READY:
+                return
+            if data.get("code") != NOT_READY:
+                raise RuntimeError("не смог отправить файл в Max: "
+                                   + self._mask(_trouble(resp, data)))
+            if attempt < NOT_READY_TRIES:
+                # Пауза растёт: так просит их документация про «файл ещё обрабатывается».
+                self.sleep(NOT_READY_STEP * attempt)
+
+        raise RuntimeError("Max так и не дообработал файл — попробуйте ещё раз попозже")
 
     # --- ответ --------------------------------------------------------------
 
@@ -146,6 +256,41 @@ class MaxReceiver(Receiver):
             self.session.post(BASE + "/messages", params={"chat_id": chat_id},
                               json={"text": part}, headers=self.headers,
                               verify=self.verify, timeout=60)
+
+
+def _attachments(raw) -> list[Attachment]:
+    """Вложения Max в общем виде. Наклейки, точки на карте и визитки — не файлы."""
+    found: list[Attachment] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        kind = FILE_KINDS.get(str(item.get("type") or ""))
+        if kind is None:
+            continue
+        payload = item.get("payload") or {}
+        found.append(Attachment(
+            kind=kind,
+            file_id=str(payload.get("token") or ""),
+            # У файла имя и размер лежат рядом с payload, а не внутри него.
+            file_name=str(item.get("filename") or payload.get("filename") or ""),
+            size=int(item.get("size") or payload.get("size") or 0),
+            url=str(payload.get("url") or ""),
+            raw=item,
+        ))
+    return found
+
+
+def _json_of(resp) -> dict:
+    try:
+        data = resp.json()
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _trouble(resp, data: dict) -> str:
+    """Что сказал Max, одной строкой: код ошибки, текст или хотя бы номер ответа."""
+    return str(data.get("code") or data.get("message") or f"код {resp.status_code}")
 
 
 def _retry_after(resp) -> int | None:
