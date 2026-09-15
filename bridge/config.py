@@ -16,7 +16,9 @@ import yaml
 from . import texts
 
 DEFAULT_ROOT = Path.home() / ".most"
-DEFAULT_TIMEOUT_SEC = 900
+DEFAULT_TIMEOUT_SEC = 900      # бюджет времени на одну работу — 15 минут
+DEFAULT_MODEL = "sonnet"       # headless сам берёт Opus 1M; для моста это дорого
+DEFAULT_PARALLEL = 1           # на 4 ГБ у ученика двух claude сразу не бывает
 
 
 class ConfigError(RuntimeError):
@@ -46,6 +48,9 @@ class Config:
     telegram: ChannelConfig | None = None
     max: ChannelConfig | None = None
     timeout_sec: int = DEFAULT_TIMEOUT_SEC
+    executor_model: str = DEFAULT_MODEL
+    executor_extra_args: list[str] = field(default_factory=list)
+    parallel: int = DEFAULT_PARALLEL
 
     # --- производные пути ---------------------------------------------------
 
@@ -99,6 +104,13 @@ def _channel(raw: dict | None) -> ChannelConfig | None:
     return ChannelConfig(token=token, allowlist=allowlist)
 
 
+def _int(value, default: int, least: int = 1) -> int:
+    try:
+        return max(least, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
 def load_config(home: Path | None = None, name: str = "default",
                 root: Path | None = None) -> Config:
     """Читает config.yaml экземпляра. Любая беда — ConfigError с текстом для человека."""
@@ -121,19 +133,31 @@ def load_config(home: Path | None = None, name: str = "default",
     projects = raw.get("projects_dir")
     projects_dir = Path(os.path.expanduser(str(projects))) if projects else (home / "projects")
 
-    timeout = raw.get("timeout_sec") or DEFAULT_TIMEOUT_SEC
-    try:
-        timeout = int(timeout)
-    except (TypeError, ValueError):
-        timeout = DEFAULT_TIMEOUT_SEC
+    # Исполнитель: строкой (старый вид) или разделом с моделью и доводами.
+    raw_executor = raw.get("executor")
+    if isinstance(raw_executor, dict):
+        kind = str(raw_executor.get("kind") or "claude")
+        model = str(raw_executor.get("model") or DEFAULT_MODEL)
+        extra = [str(a) for a in (raw_executor.get("extra_args") or [])]
+        parallel = _int(raw_executor.get("parallel"), DEFAULT_PARALLEL)
+        timeout = _int(raw_executor.get("timeout_sec") or raw.get("timeout_sec"),
+                       DEFAULT_TIMEOUT_SEC)
+    else:
+        kind = str(raw_executor or "claude")
+        model, extra = DEFAULT_MODEL, []
+        parallel = _int(raw.get("parallel"), DEFAULT_PARALLEL)
+        timeout = _int(raw.get("timeout_sec"), DEFAULT_TIMEOUT_SEC)
 
     return Config(
         name=name,
         home=home,
         config_path=path,
         projects_dir=projects_dir,
-        executor=str(raw.get("executor") or "claude"),
+        executor=kind,
         telegram=telegram,
         max=maxx,
         timeout_sec=timeout,
+        executor_model=model,
+        executor_extra_args=extra,
+        parallel=parallel,
     )

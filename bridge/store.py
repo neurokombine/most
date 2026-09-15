@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,50 @@ JOB_INTERRUPTED = "interrupted"
 JOB_FINISHED_STATES = (JOB_DONE, JOB_FAILED, JOB_TIMEOUT, JOB_STOPPED, JOB_INTERRUPTED)
 
 
+class _Rows:
+    """Готовый ответ базы: строки уже вынуты, соединение больше не нужно."""
+
+    def __init__(self, rows, lastrowid):
+        self._rows = rows
+        self.lastrowid = lastrowid
+
+    def fetchall(self):
+        return self._rows
+
+    def fetchone(self):
+        return self._rows[0] if self._rows else None
+
+
+class _SafeConn:
+    """Соединение под замком: к базе ходят и главный цикл, и потоки работ.
+
+    Замок держим на всё время запроса и достаём строки сразу: иначе закрытие
+    базы в один поток посреди чужого запроса роняет процесс целиком
+    (получили segfault на первом же прогоне, это не теория).
+    """
+
+    def __init__(self, conn: sqlite3.Connection, lock: threading.RLock):
+        self._conn = conn
+        self._lock = lock
+
+    def execute(self, sql: str, params=()):
+        with self._lock:
+            cur = self._conn.execute(sql, params)
+            try:
+                rows = cur.fetchall()
+            except sqlite3.Error:
+                rows = []
+            return _Rows(rows, cur.lastrowid)
+
+    def executescript(self, sql: str):
+        with self._lock:
+            return self._conn.executescript(sql)
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
 def now_iso() -> str:
     """Время в UTC со смещением. Показываем человеку — переводим в московское."""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -110,24 +155,27 @@ def now_iso() -> str:
 class Store:
     def __init__(self, path: Path | str):
         self.path = Path(path)
-        self._db: sqlite3.Connection | None = None
+        self._db: _SafeConn | None = None
+        self._lock = threading.RLock()
 
     # --- служебное ----------------------------------------------------------
 
     @property
-    def db(self) -> sqlite3.Connection:
-        if self._db is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            # check_same_thread=False: работы идут в отдельных потоках, и итог
-            # пишет тот поток, который её делал. Сам sqlite3 в CPython собран
-            # сериализованным, а запись у нас короткая и редкая.
-            self._db = sqlite3.connect(self.path, timeout=30, isolation_level=None,
+    def db(self) -> _SafeConn:
+        with self._lock:
+            if self._db is None:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                # check_same_thread=False: работы идут в отдельных потоках, и
+                # итог пишет тот поток, который её делал; очередь к базе держит
+                # замок в _SafeConn.
+                conn = sqlite3.connect(self.path, timeout=30, isolation_level=None,
                                        check_same_thread=False)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute("PRAGMA journal_mode=WAL")
-            self._db.execute("PRAGMA foreign_keys=ON")
-            self._db.execute("PRAGMA busy_timeout=5000")
-        return self._db
+                conn.row_factory = sqlite3.Row
+                self._db = _SafeConn(conn, self._lock)
+                self._db.execute("PRAGMA journal_mode=WAL")
+                self._db.execute("PRAGMA foreign_keys=ON")
+                self._db.execute("PRAGMA busy_timeout=5000")
+            return self._db
 
     def init(self) -> "Store":
         self.db.executescript(SCHEMA)
@@ -146,9 +194,10 @@ class Store:
                     self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     def close(self) -> None:
-        if self._db is not None:
-            self._db.close()
-            self._db = None
+        with self._lock:
+            if self._db is not None:
+                self._db.close()
+                self._db = None
 
     def table_names(self) -> list[str]:
         rows = self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()

@@ -59,3 +59,23 @@ def test_missing_config_exits_quietly_with_a_human_text(home, capsys):
     out = capsys.readouterr().out
     assert "config.yaml" in out
     assert "Traceback" not in out
+
+
+def test_executor_settings_reach_the_real_executor(home, projects_dir):
+    write_config(home, f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+executor:
+  model: opus
+  parallel: 2
+  timeout_sec: 60
+  extra_args: ["--setting-sources", "project"]
+""")
+    bridge = build_bridge(load_config(home=home, name="test"))
+    assert bridge.executor.model == "opus"
+    assert bridge.executor.timeout == 60
+    assert bridge.executor.extra_args == ["--setting-sources", "project"]
+    assert bridge.pool.max_parallel == 2
+    bridge.store.close()

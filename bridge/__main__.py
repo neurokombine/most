@@ -32,7 +32,8 @@ def build_bridge(config) -> Bridge:
         receivers["max"] = MaxReceiver(token=config.max.token, store=store)
 
     executor = ClaudeExecutor(jobs_dir=config.jobs_dir, timeout=config.timeout_sec,
-                              secrets=config.secrets())
+                              secrets=config.secrets(), model=config.executor_model,
+                              extra_args=config.executor_extra_args)
     return Bridge(config=config, store=store, executor=executor, receivers=receivers)
 
 
@@ -58,14 +59,19 @@ def main(argv: list[str] | None = None) -> int:
 
     bridge = build_bridge(config)
     channels = ", ".join(config.enabled_channels()) or "нет"
-    print(f"мост «{config.name}»: слушаю {channels}; папка проектов {config.projects_dir}",
-          flush=True)
+    print(f"мост «{config.name}»: слушаю {channels}; папка проектов {config.projects_dir}; "
+          f"нейросеть {config.executor_model}, работ за раз {config.parallel}, "
+          f"бюджет {config.timeout_sec // 60} мин", flush=True)
     try:
         return bridge.run(max_ticks=1 if args.once else None)
     except KeyboardInterrupt:
         print("мост: остановлен с клавиатуры", flush=True)
         return 0
     finally:
+        # Сначала гасим работы, потом базу: закрыть её из-под живого потока —
+        # уронить процесс целиком.
+        bridge.pool.stop_all()
+        bridge.pool.wait_idle(timeout=30)
         bridge.store.close()
 
 

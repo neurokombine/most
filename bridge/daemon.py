@@ -22,9 +22,10 @@ from pathlib import Path
 
 import requests
 
-from . import texts
+from . import narrator, texts
 from .receivers.base import BridgeConflict, RateLimited, TokenRejected, mask
 from .router import Router
+from .works import WorkPool
 
 EXIT_OK = 0
 EXIT_STALE = 3          # «мой код устарел» — юнит поднимет новую версию
@@ -38,13 +39,16 @@ TOKEN_TEXT = {"telegram": texts.TELEGRAM_TOKEN_REJECTED, "max": texts.MAX_TOKEN_
 
 class Bridge:
     def __init__(self, config, store, executor, receivers: dict, sleeper=time.sleep,
-                 router: Router | None = None):
+                 router: Router | None = None, pool: WorkPool | None = None):
         self.config = config
         self.store = store
         self.executor = executor
         self.receivers = dict(receivers)
         self.sleep = sleeper
-        self.router = router or Router(config=config, store=store, executor=executor)
+        self.pool = pool or WorkPool(executor=executor, store=store,
+                                     max_parallel=getattr(config, "parallel", 1))
+        self.router = router or Router(config=config, store=store, executor=executor,
+                                       pool=self.pool)
         self._fingerprint = _code_fingerprint()
 
     # --- состояние ----------------------------------------------------------
@@ -96,7 +100,62 @@ class Bridge:
             for message in incoming:
                 handled += 1
                 self._answer(receiver, message)
+
+        handled += self.deliver()
         return handled
+
+    # --- готовые работы -----------------------------------------------------
+
+    def deliver(self) -> int:
+        """Доделанные работы отвечают в чат отсюда, из главного потока.
+
+        Из рабочих потоков в мессенджер не пишем: приёмник и его соединение
+        у канала одно на всех.
+        """
+        delivered = 0
+        for work in self.pool.collect():
+            receiver = self.receivers.get(work.channel)
+            if receiver is None:
+                continue
+            try:
+                answers = self.router.finished_messages(work)
+            except Exception as exc:                        # noqa: BLE001
+                answers = [texts.WORK_FAILED.format(error=self._mask(str(exc)))]
+            for answer in answers:
+                try:
+                    receiver.send(work.chat_id, answer)
+                except Exception as exc:                    # noqa: BLE001
+                    self.store.note("error", channel=work.channel, chat_id=work.chat_id,
+                                    text=self._mask(f"не смог ответить: {exc}")[:200])
+                    break
+            delivered += 1
+        return delivered
+
+    # --- после перезагрузки -------------------------------------------------
+
+    def recover(self) -> int:
+        """Работы, застигнутые перезагрузкой, честно объявляем прерванными.
+
+        Связки и сессии остаются: разговор можно продолжить, а вот задание
+        не доделано — и человек должен узнать об этом от моста, а не по тишине.
+        """
+        told = 0
+        for job in self.store.mark_running_interrupted():
+            receiver = self.receivers.get(job["channel"])
+            head = (job["prompt_head"] or "").strip().replace("\n", " ")[:60]
+            _say(f"прерванная работа {job['id']}: {head}")
+            if receiver is None:
+                continue
+            text = texts.INTERRUPTED_BY_RESTART.format(head=head)
+            limit = getattr(receiver, "limit", narrator.TELEGRAM_LIMIT)
+            try:
+                for piece in narrator.chunk(text, limit):
+                    receiver.send(job["chat_id"], piece)
+                told += 1
+            except Exception as exc:                        # noqa: BLE001
+                self.store.note("error", channel=job["channel"], chat_id=job["chat_id"],
+                                text=self._mask(f"не сказал о прерванной работе: {exc}")[:200])
+        return told
 
     def _answer(self, receiver, message) -> None:
         try:
@@ -122,6 +181,7 @@ class Bridge:
 
     def run(self, max_ticks: int | None = None) -> int:
         ticks = 0
+        self.recover()
         while self.alive():
             if self.code_changed():
                 _say("код моста изменился — перезапускаюсь, чтобы работать новой версией")
@@ -132,6 +192,10 @@ class Bridge:
                 break
             if not handled:
                 self.sleep(IDLE_PAUSE)
+        if max_ticks is not None:
+            # Отладочный заход «один раз»: дожидаемся работы и отвечаем по ней.
+            self.pool.wait_idle(timeout=getattr(self.config, "timeout_sec", 900) + 5)
+            self.deliver()
         if not self.alive():
             _say("слушать больше нечего — выхожу. Почините настройку и запустите снова.")
         return EXIT_OK
