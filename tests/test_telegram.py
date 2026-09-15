@@ -78,9 +78,10 @@ def test_non_json_answer_is_skipped_without_moving_offset(store):
 
 
 def test_update_without_text_is_ignored_but_offset_moves(store):
+    """Наклейка — не текст и не файл: сказать нечего, но смещение сдвигаем."""
     r = make(store, [FakeResponse(200, {"ok": True, "result": [
         {"update_id": 3, "message": {"from": {"id": 1}, "chat": {"id": 2},
-                                     "voice": {"file_id": "x"}}}]})])
+                                     "sticker": {"file_id": "x"}}}]})])
     assert r.poll_once() == []
     assert store.get_setting("telegram_offset") == "4"
 
@@ -260,3 +261,79 @@ def test_sending_a_file_over_fifty_megabytes_is_refused(store, tmp_path):
     with pytest.raises(FileTooBig):
         r.send_file(500, path)
     assert session.calls == []
+
+
+# --- этап 4: голос ----------------------------------------------------------
+
+def with_voice(update_id=40, duration=17, caption=None):
+    message = {"message_id": update_id, "from": {"id": 111},
+               "chat": {"id": 500, "type": "private"},
+               "voice": {"file_id": "AwACAgIA-voice", "file_unique_id": "v",
+                         "duration": duration, "mime_type": "audio/ogg",
+                         "file_size": 30000}}
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
+def test_voice_message_becomes_an_attachment(store):
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [with_voice()]})])
+    msg = r.poll_once()[0]
+    att = msg.attachments[0]
+    assert att.kind == "voice"
+    assert att.file_id == "AwACAgIA-voice"
+    assert att.duration == 17
+    assert att.file_name == ""              # у голосового имени нет, его придумает почтальон
+
+
+def test_voice_message_without_text_is_not_dropped_anymore(store):
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [with_voice()]})])
+    assert len(r.poll_once()) == 1
+
+
+def test_audio_file_carries_its_length_too(store):
+    body = {"file_id": "a", "file_unique_id": "a", "file_size": 10,
+            "file_name": "запись.mp3", "duration": 42}
+    upd = {"update_id": 41, "message": {"message_id": 41, "from": {"id": 111},
+                                        "chat": {"id": 500, "type": "private"},
+                                        "audio": body}}
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [upd]})])
+    att = r.poll_once()[0].attachments[0]
+    assert att.kind == "audio"
+    assert att.duration == 42
+
+
+def test_ogg_answer_goes_out_as_a_voice_message(store, tmp_path):
+    path = tmp_path / "otvet.ogg"
+    path.write_bytes(b"OggS")
+    session = FakeSession([FakeResponse(200, {"ok": True, "result": {}})])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    r.send_voice(500, path, caption="Готово")
+
+    call = session.calls[0]
+    assert call["url"].endswith("/sendVoice")
+    assert "voice" in call["files"]
+    assert call["data"]["chat_id"] == 500
+    assert call["data"]["caption"] == "Готово"
+
+
+def test_wav_answer_goes_out_as_audio_when_there_is_no_ogg(store, tmp_path):
+    """Без ffmpeg запись остаётся wav — тогда это обычное аудио, а не кружок."""
+    path = tmp_path / "otvet.wav"
+    path.write_bytes(b"RIFF")
+    session = FakeSession([FakeResponse(200, {"ok": True, "result": {}})])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    r.send_voice(500, path)
+
+    call = session.calls[0]
+    assert call["url"].endswith("/sendAudio")
+    assert "audio" in call["files"]
+
+
+def test_too_big_voice_answer_is_refused(store, tmp_path):
+    path = tmp_path / "otvet.ogg"
+    path.write_bytes(b"x")
+    r = TelegramReceiver(token="123:abc", store=store, session=FakeSession([]))
+    r.upload_limit = 0
+    with pytest.raises(FileTooBig):
+        r.send_voice(500, path)

@@ -26,6 +26,9 @@ class Attachment:
     file_name: str = ""   # у снимков с телефона имени не бывает вовсе
     size: int = 0         # 0 — значит, мессенджер размера не сказал
     url: str = ""         # Max отдаёт ссылку сразу, Telegram — нет
+    # Длина записи в секундах, если мессенджер её назвал. Нужна голосу: слишком
+    # длинное голосовое отвергается до скачивания, а не после минут расшифровки.
+    duration: int = 0
     raw: dict = field(default_factory=dict)
 
 
@@ -105,4 +108,8 @@ class Receiver:
 
     def send_file(self, chat_id: int, path, caption: str = "") -> None:
         """Отправляет файл с диска. Больше предела — FileTooBig."""
+        raise NotImplementedError
+
+    def send_voice(self, chat_id: int, path, caption: str = "") -> None:
+        """Отправляет запись голосом. Нет ogg — уйдёт обычным аудио."""
         raise NotImplementedError

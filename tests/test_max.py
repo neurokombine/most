@@ -305,3 +305,42 @@ def test_upload_trouble_never_shows_the_token(store, tmp_path):
     with pytest.raises(RuntimeError) as exc:
         r.send_file(900, path)
     assert "max-token" not in str(exc.value)
+
+
+# --- этап 4: голос ----------------------------------------------------------
+
+def test_audio_attachment_carries_its_length(store):
+    update = nested_update("")
+    update["message"]["body"]["attachments"] = [
+        {"type": "audio", "payload": {"url": "https://a/3", "token": "t3"},
+         "duration": 25},
+    ]
+    r = make(store, [FakeResponse(200, {"updates": [update], "marker": 1})])
+    att = r.poll_once()[0].attachments[0]
+    assert att.kind == "audio"
+    assert att.duration == 25
+
+
+def test_voice_answer_goes_out_through_the_audio_upload(store, tmp_path):
+    path = tmp_path / "otvet.ogg"
+    path.write_bytes(b"OggS")
+    session = FakeSession(upload_responses())
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=lambda s: None)
+    r.send_voice(900, path, caption="Готово")
+
+    first, second, third = session.calls
+    assert first["url"].endswith("/uploads")
+    assert first["params"]["type"] == "audio"        # не file: иначе это не запись
+    assert second["url"] == "https://fu.oneme.ru/upload/xyz"
+    assert third["json"]["attachments"] == [{"type": "audio",
+                                             "payload": {"token": "uploaded-token"}}]
+    assert third["json"]["text"] == "Готово"
+
+
+def test_too_big_voice_answer_is_refused_in_max(store, tmp_path):
+    path = tmp_path / "otvet.ogg"
+    path.write_bytes(b"x")
+    r = MaxReceiver(token="max-token", store=store, session=FakeSession([]))
+    r.upload_limit = 0
+    with pytest.raises(FileTooBig):
+        r.send_voice(900, path)

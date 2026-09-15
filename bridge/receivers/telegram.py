@@ -28,11 +28,13 @@ FILE_TIMEOUT = 180
 
 # Поля сообщения с файлом → наш общий вид. Порядок важен: у сообщения бывает
 # и документ, и подпись, но два файла в одном сообщении Telegram не пришлёт.
-# Голосовые сюда нарочно не входят: их распознаёт этап 4, и до него
-# голосовое остаётся неуслышанным, а не ложится файлом в папку.
-FILE_FIELDS = (("document", "file"), ("photo", "photo"), ("video", "video"),
-               ("audio", "audio"))
+# Голосовое стоит первым: с этапа 4 мост его слышит, и разбирать его надо
+# раньше остальных полей.
+FILE_FIELDS = (("voice", "voice"), ("document", "file"), ("photo", "photo"),
+               ("video", "video"), ("audio", "audio"), ("video_note", "voice"))
 TOO_BIG_MARKS = ("file is too big", "file_id_invalid_too_big")
+# Что Telegram покажет голосовым кружком, а что — обычным аудио-файлом.
+VOICE_SUFFIXES = (".ogg", ".oga", ".opus")
 
 
 class TelegramReceiver(Receiver):
@@ -116,7 +118,7 @@ class TelegramReceiver(Receiver):
         # Подпись к файлу — это задание про него: «посчитай итог по этой таблице».
         text = (message.get("text") or message.get("caption") or "").strip()
         if not text and not attachments:
-            return None                                       # голосовые — этап 4
+            return None                                       # сказать нечего и файла нет
         chat = message.get("chat") or {}
         sender = message.get("from") or {}
         return Incoming(
@@ -176,6 +178,36 @@ class TelegramReceiver(Receiver):
             raise RuntimeError(f"не смог забрать файл: код {body.status_code}")
         return body.content
 
+    def send_voice(self, chat_id: int, path, caption: str = "") -> None:
+        """Отвечает голосом. ogg/opus Telegram покажет кружком, прочее — аудио-файлом.
+
+        Перегонять wav в ogg — дело ffmpeg, и он есть не везде. Нет его —
+        уходит `sendAudio`: слышно то же самое, вид сообщения другой.
+        """
+        path = Path(path)
+        size = path.stat().st_size
+        if size > self.upload_limit:
+            raise FileTooBig("Telegram не пропускает файлы больше 50 МБ",
+                             size=size, limit=self.upload_limit)
+
+        voice_like = path.suffix.lower() in VOICE_SUFFIXES
+        method, field = ("sendVoice", "voice") if voice_like else ("sendAudio", "audio")
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption[:1024]
+        with open(path, "rb") as body:
+            resp = self.session.post(self._url(method), data=data,
+                                     files={field: (path.name, body)},
+                                     timeout=FILE_TIMEOUT)
+        try:
+            answer = resp.json() or {}
+        except ValueError:
+            answer = {}
+        if not answer.get("ok", resp.status_code < 400):
+            raise RuntimeError("не смог отправить голосом: "
+                               + self._mask(answer.get("description")
+                                            or f"код {resp.status_code}"))
+
     def send_file(self, chat_id: int, path, caption: str = "") -> None:
         """Отправляет файл документом — и снимок тоже: иначе Telegram его пережмёт."""
         path = Path(path)
@@ -212,7 +244,8 @@ def _attachments(message: dict) -> list[Attachment]:
             body = sorted(body, key=lambda item: item.get("file_size") or 0)[-1]
         return [Attachment(kind=kind, file_id=str(body.get("file_id") or ""),
                            file_name=str(body.get("file_name") or ""),
-                           size=int(body.get("file_size") or 0), raw=body)]
+                           size=int(body.get("file_size") or 0),
+                           duration=int(body.get("duration") or 0), raw=body)]
     return []
 
 def _retry_after(resp) -> int | None:

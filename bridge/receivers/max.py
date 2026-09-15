@@ -139,7 +139,7 @@ class MaxReceiver(Receiver):
         # Подпись к файлу — это задание про него, а не просто текст рядом.
         text = (body.get("text") or update.get("text") or "").strip()
         if not text and not attachments:
-            return None                                       # голосовые — этап 4
+            return None                                       # сказать нечего и файла нет
 
         chat_id = recipient.get("chat_id") or update.get("chat_id")
         user_id = sender.get("user_id") or recipient.get("user_id")
@@ -186,22 +186,34 @@ class MaxReceiver(Receiver):
         Снимок уходит типом `file`, а не `image`: картинкой его пережмут,
         а человек просил файл.
         """
+        self._upload_and_send(chat_id, path, caption, kind="file")
+
+    def send_voice(self, chat_id: int, path, caption: str = "") -> None:
+        """Голос уходит теми же тремя шагами, но типом `audio`.
+
+        Тип решает не расширение файла, а то, как Max покажет сообщение:
+        `file` был бы вложением, которое надо скачивать, `audio` — записью,
+        которую слушают прямо в чате.
+        """
+        self._upload_and_send(chat_id, path, caption, kind="audio")
+
+    def _upload_and_send(self, chat_id: int, path, caption: str, kind: str) -> None:
         path = Path(path)
         size = path.stat().st_size
         if size > self.upload_limit:
             raise FileTooBig("файл больше, чем мост отправляет через Max",
                              size=size, limit=self.upload_limit)
 
-        place = self._ask_for_a_place()
+        place = self._ask_for_a_place(kind)
         token = self._upload(place.get("url") or "", path) or place.get("token")
         if not token:
             raise RuntimeError("Max не вернул метку загруженного файла")
 
         self.sleep(UPLOAD_SETTLE)     # их сторона дожёвывает файл — дадим ей секунду
-        self._send_with_attachment(chat_id, token, caption)
+        self._send_with_attachment(chat_id, token, caption, kind=kind)
 
-    def _ask_for_a_place(self) -> dict:
-        resp = self.session.post(BASE + "/uploads", params={"type": "file"},
+    def _ask_for_a_place(self, kind: str = "file") -> dict:
+        resp = self.session.post(BASE + "/uploads", params={"type": kind},
                                  headers=self.headers, verify=self.verify, timeout=60)
         data = _json_of(resp)
         if resp.status_code >= 400 or not (data.get("url") or data.get("token")):
@@ -223,8 +235,9 @@ class MaxReceiver(Receiver):
                                + self._mask(_trouble(resp, data)))
         return str(data.get("token") or "")
 
-    def _send_with_attachment(self, chat_id: int, token: str, caption: str) -> None:
-        body = {"attachments": [{"type": "file", "payload": {"token": token}}]}
+    def _send_with_attachment(self, chat_id: int, token: str, caption: str,
+                              kind: str = "file") -> None:
+        body = {"attachments": [{"type": kind, "payload": {"token": token}}]}
         if caption:
             body["text"] = caption[:self.limit]
 
@@ -274,6 +287,9 @@ def _attachments(raw) -> list[Attachment]:
             # У файла имя и размер лежат рядом с payload, а не внутри него.
             file_name=str(item.get("filename") or payload.get("filename") or ""),
             size=int(item.get("size") or payload.get("size") or 0),
+            # Длину записи Max кладёт рядом с вложением; её может и не быть —
+            # тогда предел длины проверит уже сам распознаватель.
+            duration=int(item.get("duration") or payload.get("duration") or 0),
             url=str(payload.get("url") or ""),
             raw=item,
         ))
