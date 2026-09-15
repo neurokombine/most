@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS journal (
     channel       TEXT,
     chat_id       INTEGER,
     user_id       INTEGER,
+    name          TEXT,
     text          TEXT
 );
 
@@ -78,7 +79,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at   TEXT,
     exit_code     INTEGER,
     duration_sec  REAL,
-    result_head   TEXT
+    result_head   TEXT,
+    pid           INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS journal_at ON journal (at DESC);
@@ -86,6 +88,7 @@ CREATE INDEX IF NOT EXISTS jobs_started ON jobs (started_at DESC);
 """
 
 KNOCK_TEXT_LIMIT = 40
+KNOCK_NAME_LIMIT = 60
 RESULT_HEAD_LIMIT = 200
 
 # Колонки, которые появились позже первой версии. База у ученика уже живёт,
@@ -93,7 +96,8 @@ RESULT_HEAD_LIMIT = 200
 LATE_COLUMNS = {
     "links": [("session_started", "INTEGER NOT NULL DEFAULT 0")],
     "jobs": [("duration_sec", "REAL"), ("result_head", "TEXT"),
-             ("cost_usd", "REAL"), ("schedule_id", "INTEGER")],
+             ("cost_usd", "REAL"), ("schedule_id", "INTEGER"), ("pid", "INTEGER")],
+    "journal": [("name", "TEXT")],
     "schedule": [("project", "TEXT"), ("next_run_at", "TEXT")],
 }
 
@@ -294,6 +298,34 @@ class Store:
                 "INSERT OR IGNORE INTO allowlist(channel, user_id, added_at) VALUES(?,?,?)",
                 (channel, int(user_id), now_iso()))
 
+    def allow(self, channel: str, user_id: int, note: str | None = None) -> bool:
+        """Пускает человека. True — значит, раньше его в списке не было.
+
+        Список живёт в базе, и демон читает его на каждом сообщении: пустили
+        человека — он заговорил с ботом сразу, без перезапуска моста.
+        """
+        if self.is_allowed(channel, user_id):
+            return False
+        self.db.execute(
+            "INSERT OR IGNORE INTO allowlist(channel, user_id, note, added_at) VALUES(?,?,?,?)",
+            (channel, int(user_id), note, now_iso()))
+        return True
+
+    def deny(self, channel: str, user_id: int) -> bool:
+        """Убирает человека из своих. True — значит, он там был."""
+        if not self.is_allowed(channel, user_id):
+            return False
+        self.db.execute("DELETE FROM allowlist WHERE channel=? AND user_id=?",
+                        (channel, int(user_id)))
+        return True
+
+    def list_allowed(self, channel: str | None = None):
+        if channel is None:
+            return self.db.execute(
+                "SELECT * FROM allowlist ORDER BY channel, user_id").fetchall()
+        return self.db.execute(
+            "SELECT * FROM allowlist WHERE channel=? ORDER BY user_id", (channel,)).fetchall()
+
     def is_allowed(self, channel: str, user_id: int) -> bool:
         row = self.db.execute("SELECT 1 FROM allowlist WHERE channel=? AND user_id=?",
                               (channel, int(user_id))).fetchone()
@@ -302,15 +334,32 @@ class Store:
     # --- журнал -------------------------------------------------------------
 
     def note(self, kind: str, channel: str | None = None, chat_id: int | None = None,
-             user_id: int | None = None, text: str = "") -> None:
+             user_id: int | None = None, text: str = "", name: str | None = None) -> None:
         self.db.execute(
-            "INSERT INTO journal(at, kind, channel, chat_id, user_id, text) VALUES(?,?,?,?,?,?)",
-            (now_iso(), kind, channel, chat_id, user_id, text))
+            "INSERT INTO journal(at, kind, channel, chat_id, user_id, name, text) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (now_iso(), kind, channel, chat_id, user_id, name, text))
 
-    def note_stranger(self, channel: str, chat_id: int, user_id: int, text: str) -> None:
-        """Чужой стук: молчим в чат, но пишем сюда — иначе молчание неотличимо от поломки."""
+    def note_stranger(self, channel: str, chat_id: int, user_id: int, text: str,
+                      name: str = "") -> None:
+        """Чужой стук: молчим в чат, но пишем сюда — иначе молчание неотличимо от поломки.
+
+        Имя пишем рядом с номером нарочно: человек своего номера в мессенджере
+        не знает и не должен, а себя в списке стучавшихся он узнаёт по имени.
+        """
         head = (text or "").strip().replace("\n", " ")[:KNOCK_TEXT_LIMIT]
-        self.note("stranger", channel=channel, chat_id=chat_id, user_id=user_id, text=head)
+        self.note("stranger", channel=channel, chat_id=chat_id, user_id=user_id,
+                  text=head, name=(name or "").strip()[:KNOCK_NAME_LIMIT] or None)
+
+    def last_knocks(self) -> dict:
+        """Последний постучавшийся в каждом канале: «пусти меня» — это про него."""
+        rows = self.db.execute(
+            "SELECT channel, user_id FROM journal WHERE kind='stranger' "
+            "ORDER BY id DESC").fetchall()
+        out: dict = {}
+        for row in rows:
+            out.setdefault(row["channel"], int(row["user_id"]))
+        return out
 
     def recent_strangers(self, limit: int = 20):
         return self.db.execute(
@@ -345,6 +394,16 @@ class Store:
     def set_job_schedule(self, job_id: str, schedule_id: int) -> None:
         """Работу завёл будильник: по этой метке собирается «что запускалось ночью»."""
         self.db.execute("UPDATE jobs SET schedule_id=? WHERE id=?", (int(schedule_id), job_id))
+
+    def set_job_pid(self, job_id: str, pid: int | None) -> None:
+        """Номер процесса нейросети. Без него после падения моста её не найти:
+        работа в базе значится живой, а гасить нечего."""
+        self.db.execute("UPDATE jobs SET pid=? WHERE id=?",
+                        (int(pid) if pid else None, job_id))
+
+    def running_jobs(self):
+        return self.db.execute(
+            "SELECT * FROM jobs WHERE state=? ORDER BY started_at", (JOB_RUNNING,)).fetchall()
 
     def set_job_dir(self, job_id: str, job_dir: str) -> None:
         """Папку журнала знает только исполнитель — записываем, когда он её завёл."""

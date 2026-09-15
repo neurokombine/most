@@ -152,6 +152,7 @@ class MaxReceiver(Receiver):
             user_id=int(user_id),
             text=text,
             thread_id=0,                                      # тем в личке Max нет
+            name=_who(sender),
             raw=update,
             attachments=attachments,
         )
@@ -269,6 +270,17 @@ class MaxReceiver(Receiver):
             self.session.post(BASE + "/messages", params={"chat_id": chat_id},
                               json={"text": part}, headers=self.headers,
                               verify=self.verify, timeout=60)
+
+
+def _who(sender: dict) -> str:
+    """Имя отправителя так, как его показывает Max."""
+    for key in ("name", "first_name", "display_name"):
+        value = str(sender.get(key) or "").strip()
+        if value:
+            last = str(sender.get("last_name") or "").strip()
+            return f"{value} {last}".strip() if key == "first_name" and last else value
+    nick = str(sender.get("username") or "").strip()
+    return f"@{nick}" if nick else ""
 
 
 def _attachments(raw) -> list[Attachment]:

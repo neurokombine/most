@@ -116,10 +116,22 @@ class WorkPool:
                         started_wall=time.time())
             self._running[key] = work
 
+        # Номер процесса нужен не работе, а следующему запуску моста: упавший
+        # мост оставляет `claude` живым, и найти его можно только по pid.
+        work.handle.on_start = lambda pid, job_dir=None: self._note_start(work, pid, job_dir)
         self.store.touch_link(link["id"], state="working")
         threading.Thread(target=self._work, args=(work,), daemon=True,
                          name=f"most-work-{job_id}").start()
         return work
+
+    def _note_start(self, work: "Work", pid: int, job_dir=None) -> None:
+        """Исполнитель сказал, что процесс пошёл: записываем pid и папку журнала."""
+        try:
+            self.store.set_job_pid(work.job_id, pid)
+            if job_dir:
+                self.store.set_job_dir(work.job_id, str(job_dir))
+        except Exception as exc:                        # noqa: BLE001
+            print(f"мост: не записал номер процесса работы {work.job_id}: {exc}", flush=True)
 
     def stop(self, key: Key) -> Work | None:
         """«Стоп»: гасим работу этой связки. None — значит, гасить нечего."""

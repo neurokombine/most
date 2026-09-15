@@ -41,6 +41,9 @@ class Incoming:
     user_id: int
     text: str
     thread_id: int = 0    # тема форума; в личке и в Max всегда 0
+    # Имя человека так, как его показывает мессенджер. Нужно журналу стуков:
+    # своего номера человек не знает, а себя в списке узнаёт по имени.
+    name: str = ""
     raw: dict = field(default_factory=dict)
     # Подпись к файлу приходит в `text`: она и есть задание про этот файл.
     attachments: list = field(default_factory=list)

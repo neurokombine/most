@@ -288,3 +288,55 @@ def test_strangers_and_journal_are_readable_by_day(store):
     assert len(store.strangers_since(since)) == 1
     assert len(store.journal_since("missed", since)) == 1
     assert store.journal_since("missed", "2027-01-01T00:00:00+00:00") == []
+
+
+# --- этап 6: белый список руками, имя стучавшегося, pid работы ---------------
+
+def test_allowlist_can_be_changed_without_the_config(store):
+    """Нейросеть пускает человека командой — и мост слышит это без перезапуска."""
+    assert store.is_allowed("telegram", 555) is False
+    assert store.allow("telegram", 555, note="пустила по просьбе") is True
+    assert store.is_allowed("telegram", 555) is True
+    assert store.allow("telegram", 555) is False          # второй раз — уже свой
+    assert store.deny("telegram", 555) is True
+    assert store.is_allowed("telegram", 555) is False
+    assert store.deny("telegram", 555) is False           # убирать больше нечего
+
+
+def test_allowlist_is_listed_with_channels(store):
+    store.allow("telegram", 111)
+    store.allow("max", 222)
+    rows = store.list_allowed()
+    assert {(r["channel"], r["user_id"]) for r in rows} == {("telegram", 111), ("max", 222)}
+    assert [r["user_id"] for r in store.list_allowed("max")] == [222]
+
+
+def test_the_knock_remembers_the_name(store):
+    store.note_stranger("telegram", 10, 555, "привет", name="Наталья")
+    row = store.recent_strangers()[0]
+    assert row["user_id"] == 555
+    assert row["name"] == "Наталья"
+    assert row["text"] == "привет"
+
+
+def test_the_knock_without_a_name_is_fine(store):
+    store.note_stranger("max", 10, 777, "привет")
+    assert store.recent_strangers()[0]["name"] in (None, "")
+
+
+def test_the_last_knock_of_every_channel(store):
+    store.note_stranger("telegram", 10, 111, "раз")
+    store.note_stranger("telegram", 10, 222, "два")
+    store.note_stranger("max", 10, 333, "три")
+    last = store.last_knocks()
+    assert last == {"telegram": 222, "max": 333}
+
+
+def test_a_running_job_remembers_its_pid(store):
+    job_id = store.start_job(link_id=None, channel="telegram", chat_id=1,
+                             session_id="s", prompt="сделай", job_dir="")
+    store.set_job_pid(job_id, 4242)
+    rows = store.running_jobs()
+    assert [(r["id"], r["pid"]) for r in rows] == [(job_id, 4242)]
+    assert store.mark_running_interrupted()[0]["pid"] == 4242
+    assert store.running_jobs() == []

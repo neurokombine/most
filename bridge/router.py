@@ -187,7 +187,8 @@ class Router:
         if not self.store.is_allowed(incoming.channel, incoming.user_id):
             # Молчим в чат, но пишем в журнал: без записи молчание неотличимо от поломки.
             self.store.note_stranger(incoming.channel, incoming.chat_id,
-                                     incoming.user_id, text)
+                                     incoming.user_id, text,
+                                     name=getattr(incoming, "name", "") or "")
             return []
 
         limit = LIMITS.get(incoming.channel, narrator.TELEGRAM_LIMIT)

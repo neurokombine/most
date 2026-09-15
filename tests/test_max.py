@@ -344,3 +344,13 @@ def test_too_big_voice_answer_is_refused_in_max(store, tmp_path):
     r.upload_limit = 0
     with pytest.raises(FileTooBig):
         r.send_voice(900, path)
+
+
+def test_the_name_of_the_sender_comes_along(store):
+    session = FakeSession([FakeResponse(200, {"updates": [
+        {"update_type": "message_created", "timestamp": 1,
+         "message": {"sender": {"user_id": 777, "name": "Наталья"},
+                     "recipient": {"chat_id": 10},
+                     "body": {"text": "привет"}}}], "marker": 5})])
+    got = MaxReceiver(token="t", store=store, session=session).poll_once()
+    assert got[0].name == "Наталья"

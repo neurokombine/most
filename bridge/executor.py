@@ -78,12 +78,24 @@ class RunHandle:
         self._event = threading.Event()
         self.proc = None
         self.cancelled = False
+        self.pid = None
+        # Кому сказать, что процесс пошёл. Очередь работ вешает сюда запись
+        # pid в базу: упавший мост оставляет `claude` живым, и в следующий
+        # запуск найти его можно только по номеру процесса.
+        self.on_start = None
 
-    def attach(self, proc) -> None:
+    def attach(self, proc, job_dir=None) -> None:
         with self._lock:
             self.proc = proc
+            self.pid = getattr(proc, "pid", None)
             if self.cancelled:
                 _kill_group(proc)
+        callback = self.on_start
+        if callback is not None and self.pid:
+            try:
+                callback(self.pid, job_dir)
+            except Exception:                           # noqa: BLE001
+                pass                                    # запись pid не должна ронять работу
 
     def cancel(self) -> None:
         with self._lock:
@@ -272,7 +284,8 @@ class ClaudeExecutor(Executor):
                     stdin=subprocess.DEVNULL, stdout=out, stderr=err,
                     start_new_session=True, close_fds=True)
                 if handle is not None:
-                    handle.attach(proc)          # с этой секунды работу можно остановить
+                    # С этой секунды работу можно остановить, а её процесс — найти.
+                    handle.attach(proc, job_dir)
                 (job_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
                 meta["pid"] = proc.pid
                 _write_json(job_dir / "meta.json", meta)

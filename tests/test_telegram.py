@@ -349,3 +349,14 @@ def test_video_note_is_heard_as_a_voice_message(store):
     att = r.poll_once()[0].attachments[0]
     assert att.kind == "video_note"
     assert att.duration == 9
+
+
+def test_the_name_of_the_sender_comes_along(store):
+    """Имя нужно журналу стуков: своего номера человек не знает, себя узнаёт по имени."""
+    session = FakeSession([FakeResponse(200, {"ok": True, "result": [
+        {"update_id": 1, "message": {"chat": {"id": 10},
+                                     "from": {"id": 555, "first_name": "Наталья",
+                                              "last_name": "Зубченко"},
+                                     "text": "привет"}}]})])
+    got = TelegramReceiver(token="t", store=store, session=session).poll_once()
+    assert got[0].name == "Наталья Зубченко"

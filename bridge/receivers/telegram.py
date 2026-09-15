@@ -127,6 +127,7 @@ class TelegramReceiver(Receiver):
             user_id=int(sender.get("id")),
             text=text,
             thread_id=int(message.get("message_thread_id") or 0),
+            name=_who(sender),
             raw=update,
             attachments=attachments,
         )
@@ -247,6 +248,17 @@ def _attachments(message: dict) -> list[Attachment]:
                            size=int(body.get("file_size") or 0),
                            duration=int(body.get("duration") or 0), raw=body)]
     return []
+
+def _who(sender: dict) -> str:
+    """Имя отправителя: имя с фамилией, а нет их — «собачка» с прозвищем."""
+    parts = [str(sender.get("first_name") or "").strip(),
+             str(sender.get("last_name") or "").strip()]
+    name = " ".join(p for p in parts if p)
+    if name:
+        return name
+    nick = str(sender.get("username") or "").strip()
+    return f"@{nick}" if nick else ""
+
 
 def _retry_after(resp) -> int | None:
     value = (resp.headers or {}).get("Retry-After")
