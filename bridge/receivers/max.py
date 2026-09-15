@@ -22,7 +22,7 @@ import requests
 
 from ..narrator import MAX_LIMIT, chunk
 from .base import (Attachment, BridgeConflict, FileTooBig, Incoming, RateLimited,
-                   Receiver, TokenRejected, mask)
+                   Receiver, TokenRejected, check_token, mask)
 
 BASE = "https://platform-api2.max.ru"
 LONG_POLL_TIMEOUT = 25
@@ -88,6 +88,7 @@ class MaxReceiver(Receiver):
     # --- опрос --------------------------------------------------------------
 
     def poll_once(self) -> list[Incoming]:
+        check_token(self.token, "Max")
         params = {"limit": 100, "timeout": self.long_poll_timeout}
         marker = self._marker()
         if marker is not None:

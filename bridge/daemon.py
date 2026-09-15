@@ -29,6 +29,10 @@ from .router import Router
 from .store import now_iso
 from .works import WorkPool
 
+# Первые неудачи опроса говорим в журнал каждую, дальше — каждую сотую:
+# молчащий канал в «работает» страшнее шумного журнала.
+LOUD_FAILURES = 3
+QUIET_EVERY = 100
 EXIT_OK = 0
 EXIT_STALE = 3          # «мой код устарел» — юнит поднимет новую версию
 NETWORK_PAUSE = 5
@@ -62,6 +66,8 @@ class Bridge:
         self.alarm.postbox = self
         self._fingerprint = _code_fingerprint()
         self._heard_at: dict[str, float] = {}
+        # Сколько раз подряд канал споткнулся на беде, которой мы не ждали.
+        self._silent: dict[str, int] = {}
 
     # --- состояние ----------------------------------------------------------
 
@@ -89,8 +95,9 @@ class Bridge:
             except BridgeConflict:
                 self._stop_channel(channel, CONFLICT_TEXT.get(channel, texts.TELEGRAM_CONFLICT))
                 continue
-            except TokenRejected:
-                self._stop_channel(channel, TOKEN_TEXT.get(channel, texts.TELEGRAM_TOKEN_REJECTED))
+            except TokenRejected as exc:
+                self._stop_channel(channel, getattr(exc, "human", "")
+                                   or TOKEN_TEXT.get(channel, texts.TELEGRAM_TOKEN_REJECTED))
                 continue
             except RateLimited as exc:
                 wait = exc.retry_after or DEFAULT_PAUSE
@@ -104,11 +111,21 @@ class Bridge:
                 self.sleep(NETWORK_PAUSE)
                 continue
             except Exception as exc:                            # noqa: BLE001
+                # Беда, которой мы не ждали. Запись в базу была всегда, но её
+                # никто не видит: в `systemctl status` канал при этом выглядит
+                # живым, а бот молчит. Поэтому первые разы говорим и в журнал,
+                # а потом изредка — чтобы не залить его одной и той же строкой.
                 self.store.note("error", channel=channel,
                                 text=self._mask(f"опрос не удался: {exc}")[:200])
+                self._silent[channel] = times = self._silent.get(channel, 0) + 1
+                if times <= LOUD_FAILURES or times % QUIET_EVERY == 0:
+                    _say(f"{texts.CHANNEL_NAMES.get(channel, channel)}: "
+                         f"опрос не удался ({times}-й раз подряд): "
+                         f"{self._mask(str(exc))[:160]}")
                 self.sleep(NETWORK_PAUSE)
                 continue
 
+            self._silent.pop(channel, None)
             self._heard(channel)
             for message in incoming:
                 handled += 1

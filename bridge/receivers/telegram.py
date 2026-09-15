@@ -12,7 +12,7 @@ import requests
 
 from ..narrator import TELEGRAM_LIMIT, chunk
 from .base import (Attachment, BridgeConflict, FileTooBig, Incoming, RateLimited,
-                   Receiver, TokenRejected, mask)
+                   Receiver, TokenRejected, check_token, mask)
 
 API = "https://api.telegram.org/bot{token}/{method}"
 FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
@@ -66,6 +66,7 @@ class TelegramReceiver(Receiver):
     # --- опрос --------------------------------------------------------------
 
     def poll_once(self) -> list[Incoming]:
+        check_token(self.token, "телеграма")
         params = {"offset": self._offset(), "timeout": self.long_poll_timeout,
                   "allowed_updates": ",".join(ALLOWED_UPDATES)}
         resp = self.session.get(self._url("getUpdates"), params=params,

@@ -26,7 +26,7 @@ import requests
 
 from . import alarm, lock, texts, voice
 from .executor import clean_env, resolve_claude_bin
-from .receivers.base import mask
+from .receivers.base import TokenRejected, check_token, mask
 from .receivers.max import BASE as MAX_BASE
 from .receivers.max import CA_BUNDLE
 
@@ -121,8 +121,8 @@ def signed_in(claude_bin, runner) -> bool | None:
                       text=True, timeout=30, env=clean_env())
     except (OSError, subprocess.SubprocessError):
         return None
-    if done.returncode != 0:
-        return None
+    # Код возврата здесь не судья: без входа команда отвечает единицей, но
+    # ответ при этом честный и разборчивый. Судим по ответу.
     try:
         said = json.loads((done.stdout or "").strip() or "{}")
     except ValueError:
@@ -171,6 +171,10 @@ def check_network(channel: str, session=None, token: str = "") -> Check:
         return Check(False, f"токен {who} не вписан в настройки",
                      "возьмите токен у @BotFather (Telegram) или у @MasterBot (Max) "
                      "и впишите его в config.yaml")
+    try:
+        check_token(token, who)
+    except TokenRejected as exc:
+        return Check(False, f"{who}: в строке токена не токен", exc.human)
     session = session or requests.Session()
     url = PROBE[channel].format(token=token)
     kwargs = {"timeout": 20}

@@ -276,10 +276,14 @@ class FakeRun:
 
 
 def test_claude_check_notices_that_the_login_has_expired(tmp_path):
-    """`claude --version` отвечает и без входа — а работа при этом не пойдёт."""
+    """`claude --version` отвечает и без входа — а работа при этом не пойдёт.
+
+    Код возврата у этой команды без входа — единица, и это не «не смогла
+    спросить»: ответ разборчив и говорит прямо. Замерено на сервере 15.09.
+    """
     binary = tmp_path / "claude"
     binary.write_text("", encoding="utf-8")
-    runner = FakeRun(auth=(0, '{"loggedIn": false, "authMethod": "none"}'))
+    runner = FakeRun(auth=(1, '{"loggedIn": false, "authMethod": "none"}'))
     check = check_claude(str(binary), runner=runner)
     assert check.ok is False
     assert "вход" in check.what.lower()
@@ -298,7 +302,7 @@ def test_claude_check_does_not_scare_when_it_cannot_ask_about_the_login(tmp_path
     """Старая версия без такой команды — не повод пугать человека."""
     binary = tmp_path / "claude"
     binary.write_text("", encoding="utf-8")
-    check = check_claude(str(binary), runner=FakeRun(auth=(1, "unknown command")))
+    check = check_claude(str(binary), runner=FakeRun(auth=(1, "unknown command auth")))
     assert check.ok is True
 
 

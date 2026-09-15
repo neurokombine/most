@@ -12,6 +12,8 @@
 """
 import os
 
+import pytest
+
 from bridge import cli, doctor, lock, texts
 from bridge.daemon import Bridge
 from bridge.executor import FakeExecutor
@@ -136,3 +138,50 @@ def test_every_cause_has_a_text_without_a_single_number_of_an_error():
         text = getattr(texts, name)
         assert "409" not in text and "401" not in text and "404" not in text
         assert "exit" not in text.lower()
+
+
+# --- пятая причина молчания: в строке токена не токен ------------------------
+
+def test_a_hint_left_instead_of_the_token_is_named_in_words():
+    """Самая частая правка настроек вслепую: подсказку из примера не заменили."""
+    from bridge.receivers.base import TokenRejected, check_token
+
+    with pytest.raises(TokenRejected) as beda:
+        check_token("ВСТАВЬТЕ_ТОКЕН_ПОЗЖЕ", "телеграма")
+    said = beda.value.human
+    assert "русские буквы" in said
+    assert "token" in said            # человеку названа строка, которую править
+
+
+def test_a_real_token_passes_the_check():
+    from bridge.receivers.base import check_token
+
+    check_token("1234567890:AAF-abcdefghijklmnopqrstuvwxyz0123456", "телеграма")
+
+
+def test_the_doctor_does_not_fall_over_a_russian_token():
+    """Раньше это было падение с трассировкой изнутри отправки запроса."""
+    from bridge.doctor import check_network
+
+    check = check_network("max", session=None, token="ВСТАВЬТЕ_ТОКЕН_ПОЗЖЕ")
+    assert check.ok is False
+    assert "русские буквы" in (check.hint or "")
+
+
+def test_the_bridge_stops_such_a_channel_and_says_why(config, store, capsys):
+    """Канал, который никогда не заработает, обязан гаснуть, а не крутиться."""
+    config.max = None
+    beda = TokenRejected("в токене телеграма не латиница",
+                         human=texts.TOKEN_IS_NOT_A_TOKEN)
+    b, _ = bridge_with(config, store, [beda])
+    b.tick()
+    assert "telegram" not in b.receivers                   # канал погашен
+    assert "русские буквы" in capsys.readouterr().out      # и причина названа вслух
+
+
+def test_an_unexpected_failure_is_not_only_in_the_database(config, store, capsys):
+    """Молчащий канал в «работает» страшнее шумного журнала."""
+    config.max = None
+    b, _ = bridge_with(config, store, [RuntimeError("нежданное")])
+    b.tick()
+    assert "опрос не удался" in capsys.readouterr().out

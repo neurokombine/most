@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from .. import texts
+
 
 @dataclass
 class Attachment:
@@ -58,7 +60,33 @@ class BridgeConflict(RuntimeError):
 
 
 class TokenRejected(RuntimeError):
-    """Мессенджер не признал токен: перевыпущен, отозван или бота удалили."""
+    """Мессенджер не признал токен: перевыпущен, отозван или бота удалили.
+
+    `human` — та фраза, которую увидит человек, если она не совпадает с общей
+    «вернитесь к отцу ботов». Так объясняется случай, когда в строке токена
+    оказался вовсе не токен.
+    """
+
+    def __init__(self, message: str, human: str = ""):
+        super().__init__(message)
+        self.human = human
+
+
+def check_token(token: str, channel: str = "") -> None:
+    """Похоже ли это вообще на токен — до первого запроса, а не после.
+
+    Токен мессенджера — латиница, цифры и знаки. Кириллица в этой строке
+    значит одно: в настройки попала подсказка из примера («вставьте сюда…»),
+    имя бота или кусок русского текста. Ловим это здесь, потому что иначе
+    беда вылезает страшно: строка заголовка с русскими буквами роняет
+    отправку запроса изнутри, приёмник получает ошибку, которую не ждёт,
+    и канал молча крутится в пустую — ни в журнале, ни в чате ни слова.
+    """
+    try:
+        (token or "").encode("ascii")
+    except UnicodeEncodeError:
+        raise TokenRejected(f"в токене {channel or 'мессенджера'} не латиница",
+                            human=texts.TOKEN_IS_NOT_A_TOKEN) from None
 
 
 class FileTooBig(RuntimeError):
