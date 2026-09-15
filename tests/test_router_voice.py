@@ -229,3 +229,45 @@ def test_video_note_goes_the_voice_way(router, projects_dir):
     assert "слышала" in answers[0].lower()
     saved = list((projects_dir / "analitika" / postman.INBOX / postman.VOICE_DIR).iterdir())
     assert saved[0].suffix == ".mp4"
+
+
+# --- обещание голоса без поставленного голоса (найдено живьём 15.09) ---------
+
+def test_help_does_not_promise_a_voice_that_is_not_installed(config, store):
+    """Найдено на приёмке: «помощь» обещала голосовое там, где голос не ставили."""
+    deaf = make_router(config, store, ears=voice.Transcriber(), mouth=voice.Speaker())
+    said = deaf.help_text()
+    assert "не понимаю" in said
+    assert "поставь мосту голос" in said
+    assert "наговорите задачу" not in said         # обещания нет
+    assert "ответь голосом" not in said            # и ответа вслух тоже
+    deaf.pool.stop_all()
+
+
+def test_help_promises_the_voice_when_it_is_really_there(router):
+    said = router.help_text()
+    assert "наговорите задачу" in said
+    assert "ответь голосом" in said
+    assert "не понимаю" not in said
+
+
+def test_the_first_hello_is_honest_about_the_voice_too(config, store):
+    deaf = make_router(config, store, ears=voice.Transcriber(), mouth=voice.Speaker())
+    said = deaf.greeting_first()
+    assert "Голосовые пока нет" in said
+    assert "входящие" in said                      # про файлы обещание остаётся
+    deaf.pool.stop_all()
+
+    слышит = make_router(config, store)
+    assert "наговорённое разберу" in слышит.greeting_first()
+    слышит.pool.stop_all()
+
+
+def test_what_the_bridge_promises_matches_what_it_answers(config, store):
+    """Обещание и отказ — про одно и то же: не обещаем того, на что скажем «нет»."""
+    deaf = make_router(config, store, ears=voice.Transcriber(), mouth=voice.Speaker())
+    assert deaf.hears() is False
+    otvet = answers_of(deaf, with_voice())
+    assert any("Повторите текстом" in a for a in otvet)     # именно так и отвечает
+    assert "не понимаю" in deaf.help_text()                 # и ровно это обещает
+    deaf.pool.stop_all()

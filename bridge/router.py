@@ -198,6 +198,38 @@ class Router:
     def projects(self) -> list[str]:
         return work_folders(self.config.projects_dir)
 
+    # --- что обещать человеку ------------------------------------------------
+
+    def hears(self) -> bool:
+        """Слышит ли мост на самом деле — а не «включено ли в настройках».
+
+        Обещание голоса без поставленного распознавания — самое обидное из
+        возможных: человек наговаривает задачу и получает «повторите текстом».
+        Найдено живьём на приёмке 15.09: «помощь» обещала голосовое на машине,
+        где голос не ставили.
+        """
+        try:
+            return bool(self.ears.available())
+        except Exception:                                   # noqa: BLE001
+            return False
+
+    def help_text(self) -> str:
+        return texts.HELP.format(
+            voice=texts.HELP_VOICE_ON if self.hears() else texts.HELP_VOICE_OFF,
+            voice_out=texts.HELP_VOICE_OUT_ON if self.speaks() else "")
+
+    def speaks(self) -> bool:
+        """Умеет ли мост ответить вслух. Слух и голос ставятся вместе, но
+        проверяются порознь: piper мог не скачаться, а whisper встать."""
+        try:
+            return bool(self.mouth.available())
+        except Exception:                                   # noqa: BLE001
+            return False
+
+    def greeting_first(self) -> str:
+        return texts.GREETING_FIRST.format(
+            voice=texts.GREETING_VOICE_ON if self.hears() else texts.GREETING_VOICE_OFF)
+
     def default_project(self) -> str | None:
         found = self.projects()
         return found[0] if found else None
@@ -256,7 +288,7 @@ class Router:
                 self._send_named_file(incoming, receiver, send_file.group("name")), limit)
 
         if HELP_RE.match(text):
-            return narrator.chunk(texts.HELP, limit)
+            return narrator.chunk(self.help_text(), limit)
         polite = self._polite(incoming, text)
         if polite is not None:
             return narrator.chunk(polite, limit)
@@ -295,7 +327,7 @@ class Router:
             key = GREETED_KEY.format(channel=incoming.channel, user_id=incoming.user_id)
             if not self.store.get_setting(key):
                 self.store.set_setting(key, "да")
-                return texts.GREETING_FIRST
+                return self.greeting_first()
             return texts.GREETING
         if THANKS_RE.match(text):
             return texts.THANKS
