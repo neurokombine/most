@@ -19,6 +19,9 @@ DEFAULT_ROOT = Path.home() / ".most"
 DEFAULT_TIMEOUT_SEC = 900      # бюджет времени на одну работу — 15 минут
 DEFAULT_MODEL = "sonnet"       # headless сам берёт Opus 1M; для моста это дорого
 DEFAULT_PARALLEL = 1           # на 4 ГБ у ученика двух claude сразу не бывает
+DEFAULT_TIMEZONE = "Europe/Moscow"   # всё время моста — московское, пока не сказано иное
+DEFAULT_SUMMARY_AT = "08:00"   # ежедневная сводка — в восемь утра по этой зоне
+DEFAULT_TICK_SEC = 30          # как часто будильник смотрит на часы
 
 
 class ConfigError(RuntimeError):
@@ -59,6 +62,20 @@ class VoiceConfig:
 
 
 @dataclass
+class ScheduleConfig:
+    """Расписание: ежедневная сводка и частота взгляда на часы.
+
+    Время здесь и во всех задачах — по `Config.timezone`, то есть московское,
+    пока человек не сказал иначе. Зона машины не спрашивается никогда: сервер
+    у ученика стоит где угодно, а живёт он в Москве.
+    """
+
+    summary: bool = True                   # слать ли ежедневную сводку
+    summary_at: str = DEFAULT_SUMMARY_AT   # во сколько (ЧЧ:ММ по зоне моста)
+    tick_sec: int = DEFAULT_TICK_SEC
+
+
+@dataclass
 class Config:
     name: str
     home: Path
@@ -72,6 +89,8 @@ class Config:
     executor_extra_args: list[str] = field(default_factory=list)
     parallel: int = DEFAULT_PARALLEL
     voice: VoiceConfig = field(default_factory=VoiceConfig)
+    timezone: str = DEFAULT_TIMEZONE
+    schedule: ScheduleConfig = field(default_factory=ScheduleConfig)
 
     # --- производные пути ---------------------------------------------------
 
@@ -148,6 +167,31 @@ def _voice(raw, home: Path) -> VoiceConfig:
     return settings
 
 
+def _schedule(raw) -> ScheduleConfig:
+    """Раздел schedule. Нет раздела — сводка в восемь утра, и это нормально."""
+    settings = ScheduleConfig()
+    if not isinstance(raw, dict):
+        return settings
+    settings.summary = bool(raw.get("summary", True))
+    settings.summary_at = _hhmm(raw.get("summary_at"), DEFAULT_SUMMARY_AT)
+    settings.tick_sec = _int(raw.get("tick_sec"), DEFAULT_TICK_SEC, least=1)
+    return settings
+
+
+def _hhmm(value, default: str) -> str:
+    """«08:00» — да, «утром» — нет. Непонятное время не роняет мост, а отступает."""
+    raw = str(value or "").strip()
+    parts = raw.replace(".", ":").split(":")
+    if len(parts) == 2:
+        try:
+            hour, minute = int(parts[0]), int(parts[1])
+        except ValueError:
+            return default
+        if 0 <= hour < 24 and 0 <= minute < 60:
+            return f"{hour:02d}:{minute:02d}"
+    return default
+
+
 def _int(value, default: int, least: int = 1) -> int:
     try:
         return max(least, int(value))
@@ -205,4 +249,6 @@ def load_config(home: Path | None = None, name: str = "default",
         executor_extra_args=extra,
         parallel=parallel,
         voice=_voice(raw.get("voice"), home),
+        timezone=str(raw.get("timezone") or DEFAULT_TIMEZONE).strip() or DEFAULT_TIMEZONE,
+        schedule=_schedule(raw.get("schedule")),
     )

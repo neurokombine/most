@@ -23,6 +23,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import narrator
 from .executor import Executor, Result, RunHandle
 from .store import (JOB_DONE, JOB_FAILED, JOB_STOPPED, JOB_TIMEOUT)
 
@@ -184,9 +185,12 @@ class WorkPool:
             if getattr(result, "job_dir", None):
                 self.store.set_job_dir(work.job_id, str(result.job_dir))
             head = result.text or result.partial or result.error
+            # Цена работы живёт в потоке событий и нигде больше: не записали
+            # сейчас — «сколько потратила за сутки» посчитать будет не из чего.
             self.store.finish_job(work.job_id, work.state, exit_code=result.exit_code,
                                   duration_sec=round(time.monotonic() - work.started_at, 1),
-                                  result_head=head)
+                                  result_head=head,
+                                  cost_usd=narrator.cost_of(result.events))
             if result.events or result.ok or result.stopped or result.timed_out:
                 self.store.mark_session_started(work.link_id)
             self.store.touch_link(work.link_id, state="idle")

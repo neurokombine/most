@@ -235,3 +235,50 @@ voice:
     cfg = load_config(home=home, name="test")
     assert cfg.voice.max_seconds == 180
     assert cfg.voice.max_chars == 1500
+
+
+# --- этап 5: часовой пояс и ежедневная сводка -------------------------------
+
+def test_time_is_moscow_unless_said_otherwise(home, projects_dir):
+    write(home / "config.yaml", f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+""")
+    cfg = load_config(home=home, name="test")
+    assert cfg.timezone == "Europe/Moscow"
+    assert cfg.schedule.summary is True
+    assert cfg.schedule.summary_at == "08:00"
+
+
+def test_summary_can_be_moved_and_switched_off(home, projects_dir):
+    write(home / "config.yaml", f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+timezone: "Asia/Novosibirsk"
+schedule:
+  summary: false
+  summary_at: "09:15"
+  tick_sec: 5
+""")
+    cfg = load_config(home=home, name="test")
+    assert cfg.timezone == "Asia/Novosibirsk"
+    assert cfg.schedule.summary is False
+    assert cfg.schedule.summary_at == "09:15"
+    assert cfg.schedule.tick_sec == 5
+
+
+def test_nonsense_summary_time_falls_back_to_eight_in_the_morning(home, projects_dir):
+    write(home / "config.yaml", f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+schedule:
+  summary_at: "утром"
+""")
+    cfg = load_config(home=home, name="test")
+    assert cfg.schedule.summary_at == "08:00"

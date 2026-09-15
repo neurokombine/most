@@ -36,7 +36,9 @@ CREATE TABLE IF NOT EXISTS schedule (
     enabled       INTEGER NOT NULL DEFAULT 1,
     created_at    TEXT    NOT NULL,
     last_run_at   TEXT,
-    last_status   TEXT
+    last_status   TEXT,
+    project       TEXT,
+    next_run_at   TEXT
 );
 
 CREATE TABLE IF NOT EXISTS allowlist (
@@ -90,7 +92,9 @@ RESULT_HEAD_LIMIT = 200
 # и ронять её ради нового поля нельзя: добираем недостающее на месте.
 LATE_COLUMNS = {
     "links": [("session_started", "INTEGER NOT NULL DEFAULT 0")],
-    "jobs": [("duration_sec", "REAL"), ("result_head", "TEXT")],
+    "jobs": [("duration_sec", "REAL"), ("result_head", "TEXT"),
+             ("cost_usd", "REAL"), ("schedule_id", "INTEGER")],
+    "schedule": [("project", "TEXT"), ("next_run_at", "TEXT")],
 }
 
 # Состояния работы. Живая одна, остальные — чем всё кончилось.
@@ -330,12 +334,17 @@ class Store:
         return job_id
 
     def finish_job(self, job_id: str, state: str, exit_code: int | None = None,
-                   duration_sec: float | None = None, result_head: str | None = None) -> None:
+                   duration_sec: float | None = None, result_head: str | None = None,
+                   cost_usd: float | None = None) -> None:
         head = (result_head or "").strip().replace("\n", " ")[:RESULT_HEAD_LIMIT] or None
         self.db.execute(
             "UPDATE jobs SET state=?, exit_code=?, finished_at=?, duration_sec=?, "
-            "result_head=COALESCE(?, result_head) WHERE id=?",
-            (state, exit_code, now_iso(), duration_sec, head, job_id))
+            "result_head=COALESCE(?, result_head), cost_usd=COALESCE(?, cost_usd) WHERE id=?",
+            (state, exit_code, now_iso(), duration_sec, head, cost_usd, job_id))
+
+    def set_job_schedule(self, job_id: str, schedule_id: int) -> None:
+        """Работу завёл будильник: по этой метке собирается «что запускалось ночью»."""
+        self.db.execute("UPDATE jobs SET schedule_id=? WHERE id=?", (int(schedule_id), job_id))
 
     def set_job_dir(self, job_id: str, job_dir: str) -> None:
         """Папку журнала знает только исполнитель — записываем, когда он её завёл."""
@@ -375,12 +384,17 @@ class Store:
         return self.db.execute("SELECT * FROM jobs ORDER BY started_at DESC, rowid DESC LIMIT ?",
                                (limit,)).fetchall()
 
-    # --- расписание (наполнится на этапе 5) ---------------------------------
+    # --- расписание ---------------------------------------------------------
+    # Номер задачи, который человек видит в чате, — это id строки. Номера не
+    # съезжают после удаления соседней задачи: «убери задачу 2» через неделю
+    # уберёт ту же самую задачу, а не другую.
 
-    def add_schedule(self, link_id: int, spec: str, prompt: str) -> int:
+    def add_schedule(self, link_id: int, spec: str, prompt: str,
+                     project: str | None = None, next_run_at: str | None = None) -> int:
         cur = self.db.execute(
-            "INSERT INTO schedule(link_id, spec, prompt, created_at) VALUES(?,?,?,?)",
-            (link_id, spec, prompt, now_iso()))
+            "INSERT INTO schedule(link_id, spec, prompt, created_at, project, next_run_at) "
+            "VALUES(?,?,?,?,?,?)",
+            (link_id, spec, prompt, now_iso(), project, next_run_at))
         return cur.lastrowid
 
     def list_schedule(self, only_enabled: bool = False):
@@ -388,3 +402,64 @@ class Store:
         if only_enabled:
             sql += " WHERE enabled=1"
         return self.db.execute(sql + " ORDER BY id").fetchall()
+
+    def get_schedule(self, schedule_id: int):
+        return self.db.execute("SELECT * FROM schedule WHERE id=?",
+                               (int(schedule_id),)).fetchone()
+
+    def schedule_of_link(self, link_id: int):
+        return self.db.execute("SELECT * FROM schedule WHERE link_id=? ORDER BY id",
+                               (int(link_id),)).fetchall()
+
+    def set_schedule_spec(self, schedule_id: int, spec: str,
+                          next_run_at: str | None = None) -> None:
+        self.db.execute("UPDATE schedule SET spec=?, next_run_at=? WHERE id=?",
+                        (spec, next_run_at, int(schedule_id)))
+
+    def set_schedule_next(self, schedule_id: int, next_run_at: str | None) -> None:
+        self.db.execute("UPDATE schedule SET next_run_at=? WHERE id=?",
+                        (next_run_at, int(schedule_id)))
+
+    def enable_schedule(self, schedule_id: int, enabled: bool = True) -> None:
+        self.db.execute("UPDATE schedule SET enabled=? WHERE id=?",
+                        (1 if enabled else 0, int(schedule_id)))
+
+    def remove_schedule(self, schedule_id: int) -> None:
+        self.db.execute("DELETE FROM schedule WHERE id=?", (int(schedule_id),))
+
+    def mark_schedule_run(self, schedule_id: int, status: str, at: str | None = None,
+                          next_run_at: str | None = None) -> None:
+        """Чем кончился прогон и когда следующий. Пустой next_run_at не затираем."""
+        self.db.execute(
+            "UPDATE schedule SET last_status=?, last_run_at=?, "
+            "next_run_at=COALESCE(?, next_run_at) WHERE id=?",
+            (status, at or now_iso(), next_run_at, int(schedule_id)))
+
+    # --- срез за сутки: из него складывается сводка --------------------------
+
+    def jobs_since(self, since: str, only_scheduled: bool = False):
+        sql = "SELECT * FROM jobs WHERE started_at>=?"
+        if only_scheduled:
+            sql += " AND schedule_id IS NOT NULL"
+        return self.db.execute(sql + " ORDER BY started_at, rowid", (since,)).fetchall()
+
+    def spent_since(self, since: str) -> tuple[float, int]:
+        """Сколько потрачено за срок и по скольким работам цена вообще известна.
+
+        Считаем только то, что нейросеть назвала сама: придумывать цену там,
+        где её не сказали, — врать человеку про его же деньги.
+        """
+        row = self.db.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS spent, COUNT(cost_usd) AS known "
+            "FROM jobs WHERE started_at>=?", (since,)).fetchone()
+        return (float(row["spent"] or 0.0), int(row["known"] or 0))
+
+    def strangers_since(self, since: str):
+        return self.db.execute(
+            "SELECT * FROM journal WHERE kind='stranger' AND at>=? ORDER BY id",
+            (since,)).fetchall()
+
+    def journal_since(self, kind: str, since: str):
+        return self.db.execute(
+            "SELECT * FROM journal WHERE kind=? AND at>=? ORDER BY id",
+            (kind, since)).fetchall()

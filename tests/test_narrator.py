@@ -115,3 +115,19 @@ def test_partial_text_prefers_the_longer_of_delta_and_finished_reply():
 def test_partial_text_of_an_empty_stream_is_empty():
     from bridge import narrator
     assert narrator.partial_text([]) == ""
+
+
+def test_cost_is_taken_from_the_result_event():
+    """«Сколько стоило» лежит только в событии result — больше нигде."""
+    from bridge import narrator
+    events = [{"type": "assistant", "message": {"content": []}},
+              {"type": "result", "subtype": "success", "result": "Готово.",
+               "total_cost_usd": 0.0731}]
+    assert narrator.cost_of(events) == 0.0731
+
+
+def test_cost_of_a_stream_without_a_price_is_unknown():
+    from bridge import narrator
+    assert narrator.cost_of([{"type": "result", "result": "Готово."}]) is None
+    assert narrator.cost_of([]) is None
+    assert narrator.cost_of([{"type": "result", "total_cost_usd": "дорого"}]) is None

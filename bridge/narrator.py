@@ -54,6 +54,22 @@ def result_event(events: list[dict]) -> dict | None:
     return None
 
 
+def cost_of(events: list[dict]) -> float | None:
+    """Во что обошлась работа. None — значит, цену нейросеть не назвала.
+
+    Число живёт только в событии `result` (`total_cost_usd`, разведка этапа 0).
+    Из него складывается строка сводки «сколько потратила за сутки»: мост
+    считает потраченное сам, а не пересказывает чужие догадки.
+    """
+    result = result_event(events)
+    if result is None:
+        return None
+    try:
+        return float(result["total_cost_usd"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def session_id_of(events: list[dict]) -> str | None:
     for event in events:
         sid = event.get("session_id")

@@ -196,3 +196,95 @@ def test_last_finished_job_of_a_link_skips_the_running_one(store):
     store.finish_job(done, "done", exit_code=0)
     store.start_job(link["id"], "telegram", 500, "s-1", "вторая, ещё идёт", "")
     assert store.last_finished_job(link["id"])["id"] == done
+
+
+# --- этап 5: расписание живёт в базе ---------------------------------------
+
+def test_schedule_keeps_folder_time_and_next_run(store):
+    """Задача привязана к папке, в которой её задали: связку потом переключат,
+    а задача должна остаться там же."""
+    link = store.upsert_link("telegram", 1, 0, project="buhgalter", session_id="s")
+    task_id = store.add_schedule(link_id=link["id"], spec="daily 07:30",
+                                 prompt="собери сводку", project="buhgalter",
+                                 next_run_at="2026-09-16T04:30:00+00:00")
+    row = store.get_schedule(task_id)
+    assert row["project"] == "buhgalter"
+    assert row["next_run_at"] == "2026-09-16T04:30:00+00:00"
+    assert row["last_status"] is None
+
+
+def test_schedule_can_be_moved_switched_off_and_removed(store):
+    link = store.upsert_link("telegram", 1, 0, project="buhgalter", session_id="s")
+    task_id = store.add_schedule(link["id"], "daily 07:30", "сводка", project="buhgalter")
+
+    store.set_schedule_spec(task_id, "daily 08:00", next_run_at="2026-09-16T05:00:00+00:00")
+    assert store.get_schedule(task_id)["spec"] == "daily 08:00"
+
+    store.enable_schedule(task_id, False)
+    assert store.list_schedule(only_enabled=True) == []
+
+    store.remove_schedule(task_id)
+    assert store.get_schedule(task_id) is None
+
+
+def test_schedule_remembers_how_the_run_ended(store):
+    link = store.upsert_link("telegram", 1, 0, project="buhgalter", session_id="s")
+    task_id = store.add_schedule(link["id"], "daily 07:30", "сводка", project="buhgalter")
+    store.mark_schedule_run(task_id, status="done", at="2026-09-16T04:30:00+00:00",
+                            next_run_at="2026-09-17T04:30:00+00:00")
+    row = store.get_schedule(task_id)
+    assert row["last_status"] == "done"
+    assert row["last_run_at"] == "2026-09-16T04:30:00+00:00"
+    assert row["next_run_at"] == "2026-09-17T04:30:00+00:00"
+
+
+def test_job_keeps_the_price_and_the_task_it_came_from(store):
+    """Цену работы надо где-то держать: из неё складывается «сколько потрачено»."""
+    link = store.upsert_link("telegram", 1, 0, project="buhgalter", session_id="s")
+    task_id = store.add_schedule(link["id"], "daily 07:30", "сводка", project="buhgalter")
+    job_id = store.start_job(link_id=link["id"], channel="telegram", chat_id=1,
+                             session_id="s", prompt="сводка", job_dir="")
+    store.set_job_schedule(job_id, task_id)
+    store.finish_job(job_id, state="done", exit_code=0, duration_sec=12.0, cost_usd=0.21)
+
+    row = store.get_job(job_id)
+    assert row["schedule_id"] == task_id
+    assert row["cost_usd"] == 0.21
+
+
+def test_jobs_since_sees_only_the_last_day_and_only_scheduled_ones(store):
+    link = store.upsert_link("telegram", 1, 0, project="buhgalter", session_id="s")
+    task_id = store.add_schedule(link["id"], "daily 07:30", "сводка", project="buhgalter")
+
+    old = store.start_job(link["id"], "telegram", 1, "s", "позавчерашняя", "")
+    store.db.execute("UPDATE jobs SET started_at=? WHERE id=?",
+                     ("2026-09-01T00:00:00+00:00", old))
+    by_hand = store.start_job(link["id"], "telegram", 1, "s", "руками", "")
+    by_alarm = store.start_job(link["id"], "telegram", 1, "s", "по расписанию", "")
+    store.set_job_schedule(by_alarm, task_id)
+
+    since = "2026-09-02T00:00:00+00:00"
+    assert {r["id"] for r in store.jobs_since(since)} == {by_hand, by_alarm}
+    assert [r["id"] for r in store.jobs_since(since, only_scheduled=True)] == [by_alarm]
+    assert store.jobs_since("2027-01-01T00:00:00+00:00") == []
+
+
+def test_money_spent_is_counted_only_where_the_price_is_known(store):
+    link = store.upsert_link("telegram", 1, 0, project="buhgalter", session_id="s")
+    first = store.start_job(link["id"], "telegram", 1, "s", "раз", "")
+    second = store.start_job(link["id"], "telegram", 1, "s", "два", "")
+    store.finish_job(first, state="done", cost_usd=0.12)
+    store.finish_job(second, state="done")                 # цену нейросеть не назвала
+
+    spent, known = store.spent_since("2026-01-01T00:00:00+00:00")
+    assert round(spent, 2) == 0.12
+    assert known == 1
+
+
+def test_strangers_and_journal_are_readable_by_day(store):
+    store.note_stranger("telegram", 5, 555, "привет")
+    store.note("missed", text="задача 2 пропущена")
+    since = "2026-01-01T00:00:00+00:00"
+    assert len(store.strangers_since(since)) == 1
+    assert len(store.journal_since("missed", since)) == 1
+    assert store.journal_since("missed", "2027-01-01T00:00:00+00:00") == []
