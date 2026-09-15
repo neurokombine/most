@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import alarm, changes, narrator, postman, texts, voice
+from .config import work_folders
 from .executor import Executor
 from .receivers.base import FileTooBig, Incoming, mask
 from .works import WorkPool
@@ -195,11 +196,7 @@ class Router:
     # --- папки проектов -----------------------------------------------------
 
     def projects(self) -> list[str]:
-        root = Path(self.config.projects_dir)
-        if not root.exists():
-            return []
-        return sorted(p.name for p in root.iterdir()
-                      if p.is_dir() and not p.name.startswith("."))
+        return work_folders(self.config.projects_dir)
 
     def default_project(self) -> str | None:
         found = self.projects()

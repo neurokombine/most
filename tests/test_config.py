@@ -365,3 +365,22 @@ def test_the_file_with_the_token_stays_closed_to_others(home):
     add_to_allowlist(path, "telegram", 555)
     mode = stat.S_IMODE(path.stat().st_mode)
     assert mode == 0o600
+
+
+def test_the_bridge_never_offers_its_own_folder_as_a_workplace(tmp_path, monkeypatch):
+    """После переезда системы рабочая папка лежит рядом с мостом, в домашней."""
+    from bridge import config as config_module
+
+    home = tmp_path / "home"
+    (home / "docs-builder").mkdir(parents=True)
+    (home / "most").mkdir()
+    (home / ".cache").mkdir()
+    monkeypatch.setattr(config_module, "BRIDGE_ROOT", (home / "most").resolve())
+
+    assert config_module.work_folders(home) == ["docs-builder"]
+
+
+def test_missing_folder_of_projects_is_an_empty_list_not_a_fall(tmp_path):
+    from bridge.config import work_folders
+
+    assert work_folders(tmp_path / "nichego-net") == []

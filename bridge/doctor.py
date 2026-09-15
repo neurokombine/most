@@ -25,6 +25,7 @@ from pathlib import Path
 import requests
 
 from . import alarm, lock, texts, voice
+from .config import work_folders
 from .executor import clean_env, resolve_claude_bin
 from .receivers.base import TokenRejected, check_token, mask
 from .receivers.max import BASE as MAX_BASE
@@ -76,7 +77,7 @@ def check_projects(config) -> Check:
     if not root.exists():
         return Check(False, f"папки проектов нет: {root}",
                      f"создайте её: mkdir -p {root}")
-    folders = [p.name for p in sorted(root.iterdir()) if p.is_dir() and not p.name.startswith(".")]
+    folders = work_folders(root)
     if not folders:
         return Check(False, f"в папке проектов пусто: {root}",
                      "заведите внутри папку под дело — с ней мост и будет работать")

@@ -128,6 +128,31 @@ class Config:
     __str__ = __repr__
 
 
+# Папка самого моста. Она лежит рядом с рабочими папками человека — и, если
+# его проекты лежат прямо в домашней папке (а после переезда системы это самый
+# обычный случай), мост предложил бы сам себя как папку для работы. Своей
+# папкой мост не работает никогда.
+BRIDGE_ROOT = Path(__file__).resolve().parent.parent
+
+
+def work_folders(root) -> list[str]:
+    """Рабочие папки человека: всё видимое внутри, кроме папки самого моста."""
+    root = Path(root)
+    if not root.exists():
+        return []
+    found = []
+    for item in sorted(root.iterdir()):
+        if not item.is_dir() or item.name.startswith("."):
+            continue
+        try:
+            if item.resolve() == BRIDGE_ROOT:
+                continue
+        except OSError:
+            pass
+        found.append(item.name)
+    return found
+
+
 def instance_home(name: str, root: Path | None = None) -> Path:
     return (root or DEFAULT_ROOT) / name
 
