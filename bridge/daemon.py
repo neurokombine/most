@@ -125,19 +125,35 @@ class Bridge:
                 answers = self.router.finished_messages(work)
             except Exception as exc:                        # noqa: BLE001
                 answers = [texts.WORK_FAILED.format(error=self._mask(str(exc)))]
-            for answer in answers:
-                try:
-                    receiver.send(work.chat_id, answer)
-                except Exception as exc:                    # noqa: BLE001
-                    self.store.note("error", channel=work.channel, chat_id=work.chat_id,
-                                    text=self._mask(f"не смог ответить: {exc}")[:200])
-                    break
+            if not self._say_all(receiver, work.channel, work.chat_id, answers):
+                delivered += 1
+                continue
+            # Голосом — только если просили: «ответь голосом», «прочитай».
+            # Текст уже ушёл целиком, запись читает из него первые полторы тысячи.
+            try:
+                extra = self.router.voice_after_work(work, answers, receiver)
+            except Exception as exc:                        # noqa: BLE001
+                self.store.note("error", channel=work.channel, chat_id=work.chat_id,
+                                text=self._mask(f"не прочитала вслух: {exc}")[:200])
+                extra = []
+            self._say_all(receiver, work.channel, work.chat_id, extra)
             delivered += 1
         return delivered
 
+    def _say_all(self, receiver, channel: str, chat_id: int, answers) -> bool:
+        """Отправляет готовые куски в чат. False — значит, канал не принял."""
+        for answer in answers or []:
+            try:
+                receiver.send(chat_id, answer)
+            except Exception as exc:                        # noqa: BLE001
+                self.store.note("error", channel=channel, chat_id=chat_id,
+                                text=self._mask(f"не смог ответить: {exc}")[:200])
+                return False
+        return True
+
     # --- сказать во все каналы разом ----------------------------------------
 
-    def broadcast(self, text: str, file=None) -> int:
+    def broadcast(self, text: str, file=None, aloud: bool = False) -> int:
         """То, что мост присылает сам, уходит во все настроенные мессенджеры.
 
         Правило про два входа целиком: спросили в одном — ответ там же, а что
@@ -160,6 +176,11 @@ class Bridge:
                     for piece in narrator.chunk(text, getattr(receiver, "limit",
                                                               narrator.TELEGRAM_LIMIT)):
                         receiver.send(chat_id, piece)
+                    if aloud and self._reads_aloud():
+                        # Сводку читаем вслух только по настройке voice.reply:
+                        # незваный голос в семь утра — это не забота.
+                        self._say_all(receiver, channel, chat_id,
+                                      self.router.speak(chat_id, text, receiver))
                 delivered += 1
             except FileTooBig as exc:
                 too_big = exc
@@ -173,6 +194,9 @@ class Bridge:
             # человеку числами, а не общим «не вышло».
             raise too_big
         return delivered
+
+    def _reads_aloud(self) -> bool:
+        return bool(getattr(getattr(self.config, "voice", None), "reply", False))
 
     def _broadcast_chat(self, channel: str):
         """Куда говорить в этом канале: свежий чат, а если его нет — по списку своих.

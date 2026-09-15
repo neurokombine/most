@@ -314,3 +314,54 @@ def test_the_whole_way_of_a_file_through_the_real_telegram_receiver(config, stor
     out = [c for c in session.calls if "sendDocument" in c["url"]]
     assert len(out) == 1
     assert out[0]["files"]["document"][0] == "акт сверки.pdf"
+
+
+# --- этап 4: голос в главном цикле ------------------------------------------
+
+def voiced(bridge):
+    """Подставной голос вместо piper: сам мост его не отличает."""
+    from bridge import voice
+
+    bridge.router.mouth = voice.FakeSpeaker()
+    for receiver in bridge.receivers.values():
+        receiver.voices = []
+        receiver.send_voice = (lambda r: lambda chat_id, p, caption="":
+                               r.voices.append((chat_id, p, caption)))(receiver)
+    return bridge
+
+
+def test_answer_asked_aloud_goes_out_as_a_voice_message(bridge):
+    voiced(bridge)
+    bridge.receivers["telegram"].batches = [[msg("telegram", "ответь голосом: сколько осталось")]]
+    bridge.receivers["max"].batches = []
+    bridge.tick()
+    drain(bridge)
+    assert bridge.receivers["telegram"].voices               # ответ прочитан вслух
+    assert bridge.receivers["telegram"].sent[-1] == (500, "Готово.")   # и текст тоже
+
+
+def test_ordinary_answer_stays_text_only(bridge):
+    voiced(bridge)
+    bridge.tick()
+    drain(bridge)
+    assert bridge.receivers["telegram"].voices == []
+
+
+def test_summary_is_read_aloud_when_the_setting_says_so(bridge):
+    voiced(bridge)
+    bridge.config.voice.reply = True
+    bridge.tick()
+    drain(bridge)
+    assert bridge.broadcast("сводка за сегодня", aloud=True) == 2
+    assert bridge.receivers["telegram"].voices
+    assert bridge.receivers["max"].voices
+    assert bridge.receivers["max"].sent[-1] == (900, "сводка за сегодня")
+
+
+def test_summary_stays_silent_until_asked_in_the_settings(bridge):
+    voiced(bridge)
+    bridge.config.voice.reply = False
+    bridge.tick()
+    drain(bridge)
+    bridge.broadcast("сводка за сегодня", aloud=True)
+    assert bridge.receivers["telegram"].voices == []
