@@ -15,7 +15,8 @@ def test_fake_executor_records_the_call(tmp_path):
     result = fake.run("задача", tmp_path, session_id="s-1")
     assert result.ok
     assert result.text == "ответ"
-    assert fake.calls == [{"prompt": "задача", "workdir": tmp_path, "session_id": "s-1"}]
+    assert fake.calls == [{"prompt": "задача", "workdir": tmp_path, "session_id": "s-1",
+                           "resume": False}]
 
 
 def test_clean_env_keeps_only_what_is_needed():
@@ -151,3 +152,121 @@ print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
     result = ex.run("раз", work)
     assert result.ok
     assert "всё равно готово" in result.text
+
+
+# --- этап 2: продолжение разговора, остановка, бюджет времени ------------------
+
+ARGS_STUB = '''
+import json, sys
+print(json.dumps({"type": "result", "subtype": "success", "is_error": False,
+                  "result": " ".join(sys.argv[1:])}), flush=True)
+'''
+
+
+def test_first_call_sets_the_session_id_and_the_second_resumes_it(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs", claude_bin=stub(tmp_path, ARGS_STUB))
+
+    first = ex.run("раз", work, session_id="11111111-2222-3333-4444-555555555555")
+    assert "--session-id 11111111-2222-3333-4444-555555555555" in first.text
+    assert "--resume" not in first.text
+
+    second = ex.run("два", work, session_id="11111111-2222-3333-4444-555555555555",
+                    resume=True)
+    assert "--resume 11111111-2222-3333-4444-555555555555" in second.text
+    assert "--session-id" not in second.text
+    assert second.resumed is True
+
+
+def test_model_and_extra_args_reach_the_command_line(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs", claude_bin=stub(tmp_path, ARGS_STUB),
+                        model="sonnet", extra_args=["--setting-sources", "project"])
+    result = ex.run("раз", work)
+    assert "--model sonnet" in result.text
+    assert "--setting-sources project" in result.text
+
+
+LOST_STUB = '''
+import json, sys
+print(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                  "session_id": "00000000-1111-2222-3333-444444444444",
+                  "errors": ["No conversation found with session ID: 00000000-1111-2222-3333-444444444444"]}),
+      flush=True)
+sys.stderr.write("No conversation found with session ID: 00000000-1111-2222-3333-444444444444\\n")
+sys.exit(1)
+'''
+
+
+def test_lost_session_is_recognised_not_reported_as_a_random_failure(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs", claude_bin=stub(tmp_path, LOST_STUB))
+    result = ex.run("два", work, session_id="00000000-1111-2222-3333-444444444444",
+                    resume=True)
+    assert result.ok is False
+    assert result.session_lost is True
+
+
+TALKATIVE_SLOW_STUB = '''
+import json, sys, time
+print(json.dumps({"type": "assistant",
+                  "message": {"content": [{"type": "text", "text": "Успела посчитать август."}]}}),
+      flush=True)
+time.sleep(30)
+'''
+
+
+def test_stop_kills_the_work_and_keeps_what_it_managed_to_say(tmp_path):
+    import threading
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs",
+                        claude_bin=stub(tmp_path, TALKATIVE_SLOW_STUB), timeout=30)
+    handle = ex.new_handle()
+    threading.Timer(1.5, handle.cancel).start()
+
+    result = ex.run("долгая работа", work, handle=handle)
+    assert result.stopped is True
+    assert result.ok is False
+    assert result.timed_out is False
+    assert "август" in result.partial
+    assert (result.job_dir / "exit.code").read_text().strip() == "stopped"
+
+
+def test_timeout_keeps_what_it_managed_to_say(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs",
+                        claude_bin=stub(tmp_path, TALKATIVE_SLOW_STUB), timeout=2)
+    result = ex.run("долгая работа", work)
+    assert result.timed_out is True
+    assert result.stopped is False
+    assert "август" in result.partial
+
+
+def test_run_measures_how_long_it_took(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs", claude_bin=stub(tmp_path, GOOD_STUB))
+    result = ex.run("раз", work)
+    assert result.duration_sec > 0
+
+
+def test_fake_executor_can_be_stopped_too(tmp_path):
+    import threading
+    fake = FakeExecutor(text="Готово.", delay=5, partial="Успела немного.")
+    handle = fake.new_handle()
+    threading.Timer(0.2, handle.cancel).start()
+    result = fake.run("долго", tmp_path, session_id="s-1", handle=handle)
+    assert result.stopped is True
+    assert result.partial == "Успела немного."
+
+
+def test_fake_executor_can_pretend_the_session_is_lost(tmp_path):
+    fake = FakeExecutor(text="Готово.", lose_session=True)
+    result = fake.run("два", tmp_path, session_id="s-1", resume=True)
+    assert result.session_lost is True
+    assert fake.calls[0]["resume"] is True

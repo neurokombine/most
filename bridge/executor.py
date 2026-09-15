@@ -20,6 +20,7 @@ import os
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -28,8 +29,13 @@ from pathlib import Path
 from . import narrator
 from .receivers.base import mask
 
-DEFAULT_TIMEOUT = 900
+DEFAULT_TIMEOUT = 900        # бюджет времени на одну работу: 15 минут
 ERR_TAIL = 800
+DEFAULT_MODEL = "sonnet"     # по умолчанию не Opus: headless тянет самую дорогую модель
+
+# Признак того, что сессия не нашлась: id протух, папку ~/.claude вычистили,
+# работали на другой машине. Ловится и по тексту в потоке, и по stderr.
+SESSION_LOST_MARK = "No conversation found"
 
 # Что оставляем вложенному процессу. Всё прочее (включая CLAUDECODE*,
 # CLAUDE_CODE_ENTRYPOINT и любые ключи API) отрезаем.
@@ -52,6 +58,43 @@ class Result:
     text: str = ""
     error: str = ""
     timed_out: bool = False
+    stopped: bool = False          # остановлена человеком словом «стоп»
+    session_lost: bool = False     # прошлый разговор не нашёлся
+    resumed: bool = False          # шла продолжением прошлого разговора
+    partial: str = ""              # что успела сказать до остановки
+    duration_sec: float = 0.0
+
+
+class RunHandle:
+    """Ручка живой работы: за неё её останавливают.
+
+    Одна ручка — одна работа. `cancel()` можно звать из другого потока: он
+    гасит всю группу процессов (claude поднимает детей, одинокий kill их бросит).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._event = threading.Event()
+        self.proc = None
+        self.cancelled = False
+
+    def attach(self, proc) -> None:
+        with self._lock:
+            self.proc = proc
+            if self.cancelled:
+                _kill_group(proc)
+
+    def cancel(self) -> None:
+        with self._lock:
+            self.cancelled = True
+            proc = self.proc
+        self._event.set()
+        if proc is not None:
+            _kill_group(proc)
+
+    def wait(self, seconds: float) -> bool:
+        """Ждёт, но просыпается на «стоп». True — значит, остановили."""
+        return self._event.wait(seconds)
 
 
 def clean_env(source: dict | None = None) -> dict:
@@ -75,41 +118,88 @@ def resolve_claude_bin() -> str:
 
 
 class Executor:
-    """Общий интерфейс. Этап 2 добавит сюда продолжение сессии (--resume)."""
+    """Общий интерфейс исполнителя: одна работа — один вызов."""
 
-    def run(self, prompt: str, workdir: Path, session_id: str | None = None) -> Result:
+    def new_handle(self) -> RunHandle:
+        return RunHandle()
+
+    def run(self, prompt: str, workdir: Path, session_id: str | None = None,
+            resume: bool = False, handle: RunHandle | None = None) -> Result:
         raise NotImplementedError
 
 
 class FakeExecutor(Executor):
-    """Подставной исполнитель: ничего не запускает, всё записывает."""
+    """Подставной исполнитель: ничего не запускает, всё записывает.
 
-    def __init__(self, text: str = "Готово.", ok: bool = True, exit_code: int = 0):
+    Умеет то же, что настоящий: тянуть время (`delay`), останавливаться по
+    ручке, упираться в бюджет времени и врать, что сессия потерялась.
+    """
+
+    def __init__(self, text: str = "Готово.", ok: bool = True, exit_code: int = 0,
+                 delay: float = 0.0, partial: str = "", lose_session: bool = False,
+                 timeout: float = DEFAULT_TIMEOUT):
         self.text = text
         self.ok = ok
         self.exit_code = exit_code
+        self.delay = delay
+        self.partial = partial
+        self.lose_session = lose_session
+        self.timeout = timeout
         self.calls: list[dict] = []
 
-    def run(self, prompt: str, workdir: Path, session_id: str | None = None) -> Result:
-        self.calls.append({"prompt": prompt, "workdir": Path(workdir), "session_id": session_id})
+    def run(self, prompt: str, workdir: Path, session_id: str | None = None,
+            resume: bool = False, handle: RunHandle | None = None) -> Result:
+        self.calls.append({"prompt": prompt, "workdir": Path(workdir),
+                           "session_id": session_id, "resume": resume})
         session_id = session_id or str(uuid.uuid4())
+        job_id = "fake-" + uuid.uuid4().hex[:8]
+        started = time.monotonic()
+
+        if resume and self.lose_session:
+            return Result(ok=False, exit_code=1, session_id=session_id, job_id=job_id,
+                          job_dir=Path(workdir), events=[], text="",
+                          error=SESSION_LOST_MARK, session_lost=True, resumed=True,
+                          duration_sec=time.monotonic() - started)
+
+        timed_out = False
+        if self.delay:
+            waited = min(self.delay, self.timeout)
+            stopped = handle.wait(waited) if handle is not None else bool(time.sleep(waited))
+            if handle is not None and handle.cancelled:
+                return Result(ok=False, exit_code=None, session_id=session_id, job_id=job_id,
+                              job_dir=Path(workdir), events=[], text="", stopped=True,
+                              partial=self.partial, resumed=resume,
+                              duration_sec=time.monotonic() - started)
+            timed_out = self.delay > self.timeout
+            if timed_out:
+                return Result(ok=False, exit_code=None, session_id=session_id, job_id=job_id,
+                              job_dir=Path(workdir), events=[], text="", timed_out=True,
+                              partial=self.partial, resumed=resume,
+                              duration_sec=time.monotonic() - started)
+            del stopped
+
         events = [{"type": "result", "subtype": "success", "is_error": not self.ok,
                    "result": self.text, "session_id": session_id}]
         return Result(ok=self.ok, exit_code=self.exit_code, session_id=session_id,
-                      job_id="fake-" + uuid.uuid4().hex[:8], job_dir=Path(workdir),
-                      events=events, text=self.text)
+                      job_id=job_id, job_dir=Path(workdir),
+                      events=events, text=self.text, resumed=resume,
+                      error="" if self.ok else self.text,
+                      duration_sec=time.monotonic() - started)
 
 
 class ClaudeExecutor(Executor):
     """Настоящий запуск: `claude -p … --output-format stream-json --verbose`."""
 
     def __init__(self, jobs_dir: Path, claude_bin=None, timeout: int = DEFAULT_TIMEOUT,
-                 secrets=None, skip_permissions: bool = True):
+                 secrets=None, skip_permissions: bool = True,
+                 model: str | None = DEFAULT_MODEL, extra_args=None):
         self.jobs_dir = Path(jobs_dir)
         self.claude_bin = claude_bin or resolve_claude_bin()
         self.timeout = timeout
         self.secrets = list(secrets or [])
         self.skip_permissions = skip_permissions
+        self.model = (model or "").strip() or None
+        self.extra_args = [str(a) for a in (extra_args or [])]
 
     # --- служебное ----------------------------------------------------------
 
@@ -128,28 +218,45 @@ class ClaudeExecutor(Executor):
 
     # --- запуск -------------------------------------------------------------
 
-    def run(self, prompt: str, workdir: Path, session_id: str | None = None) -> Result:
+    def run(self, prompt: str, workdir: Path, session_id: str | None = None,
+            resume: bool = False, handle: RunHandle | None = None) -> Result:
         workdir = Path(workdir)
         session_id = session_id or str(uuid.uuid4())
         job_id, job_dir = self._new_job_dir()
+        started = time.monotonic()
 
         (job_dir / "prompt.md").write_text(self._mask(prompt), encoding="utf-8")
         meta = {"id": job_id, "session_id": session_id, "workdir": str(workdir),
+                "resumed": bool(resume), "model": self.model,
                 "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "pid": None}
         _write_json(job_dir / "meta.json", meta)
 
+        # Первый вызов заводит сессию своим id, второй её продолжает.
+        # Разведка этапа 0: сессия ищется по id глобально, а не по папке.
         cmd = self._bin() + [
             "-p", prompt,
             "--output-format", "stream-json",
             "--verbose",
-            "--session-id", session_id,
         ]
+        cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
+        if self.model:
+            cmd += ["--model", self.model]
+        cmd += self.extra_args
         if self.skip_permissions:
             cmd.append("--dangerously-skip-permissions")
 
         out_path = job_dir / "out.jsonl"
         err_path = job_dir / "err.log"
         timed_out = False
+        stopped = False
+
+        def unfinished(error: str, mark: str) -> Result:
+            (job_dir / "exit.code").write_text(mark, encoding="utf-8")
+            err_path.touch()
+            (job_dir / "pid").write_text("", encoding="utf-8")
+            return Result(ok=False, exit_code=None, session_id=session_id, job_id=job_id,
+                          job_dir=job_dir, events=[], text="", error=error,
+                          resumed=bool(resume), duration_sec=time.monotonic() - started)
 
         try:
             with open(out_path, "wb") as out, open(err_path, "wb") as err:
@@ -157,6 +264,8 @@ class ClaudeExecutor(Executor):
                     cmd, cwd=str(workdir), env=clean_env(),
                     stdin=subprocess.DEVNULL, stdout=out, stderr=err,
                     start_new_session=True, close_fds=True)
+                if handle is not None:
+                    handle.attach(proc)          # с этой секунды работу можно остановить
                 (job_dir / "pid").write_text(str(proc.pid), encoding="utf-8")
                 meta["pid"] = proc.pid
                 _write_json(job_dir / "meta.json", meta)
@@ -166,42 +275,48 @@ class ClaudeExecutor(Executor):
                     timed_out = True
                     _kill_group(proc)
                     exit_code = None
+                if handle is not None and handle.cancelled:
+                    stopped, timed_out = True, False
         except FileNotFoundError:
             # claude не найден — это чинится руками, и сказать надо по-человечески.
-            (job_dir / "exit.code").write_text("no-binary", encoding="utf-8")
-            err_path.touch()
-            (job_dir / "pid").write_text("", encoding="utf-8")
-            return Result(ok=False, exit_code=None, session_id=session_id, job_id=job_id,
-                          job_dir=job_dir, events=[], text="",
-                          error=f"claude не найден: {self._bin()[0]}")
+            return unfinished(f"claude не найден: {self._bin()[0]}", "no-binary")
         except OSError as exc:
-            (job_dir / "exit.code").write_text("error", encoding="utf-8")
-            return Result(ok=False, exit_code=None, session_id=session_id, job_id=job_id,
-                          job_dir=job_dir, events=[], text="",
-                          error=self._mask(f"не удалось запустить claude: {exc}"))
+            return unfinished(self._mask(f"не удалось запустить claude: {exc}"), "error")
 
-        (job_dir / "exit.code").write_text(
-            "timeout" if timed_out else str(exit_code), encoding="utf-8")
+        mark = "stopped" if stopped else ("timeout" if timed_out else str(exit_code))
+        (job_dir / "exit.code").write_text(mark, encoding="utf-8")
 
         raw = out_path.read_text(encoding="utf-8", errors="replace")
         events = narrator.parse_stream(raw)
         err_tail = self._mask(err_path.read_text(encoding="utf-8", errors="replace").strip())[-ERR_TAIL:]
 
         meta["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
-        meta["exit_code"] = "timeout" if timed_out else exit_code
+        meta["exit_code"] = mark
         _write_json(job_dir / "meta.json", meta)
 
-        ok = (not timed_out) and exit_code == 0
+        ok = (not timed_out) and (not stopped) and exit_code == 0
         text = narrator.final_text(events) if events else ""
+        partial = narrator.partial_text(events)
+        session_lost = bool(resume) and not ok and (
+            SESSION_LOST_MARK in err_tail or SESSION_LOST_MARK in raw)
+
         error = ""
-        if timed_out:
+        if stopped:
+            error = "работа остановлена по просьбе человека"
+        elif timed_out:
             error = f"работа шла дольше {self.timeout} с и была остановлена"
+        elif session_lost:
+            error = "прошлый разговор не нашёлся"
         elif not ok:
             error = err_tail or f"claude завершился с кодом {exit_code}"
 
-        return Result(ok=ok, exit_code=exit_code, session_id=narrator.session_id_of(events) or session_id,
-                      job_id=job_id, job_dir=job_dir, events=events, text=text,
-                      error=error, timed_out=timed_out)
+        return Result(ok=ok, exit_code=exit_code,
+                      session_id=narrator.session_id_of(events) or session_id,
+                      job_id=job_id, job_dir=job_dir, events=events,
+                      text="" if (stopped or timed_out) else text,
+                      error=error, timed_out=timed_out, stopped=stopped,
+                      session_lost=session_lost, resumed=bool(resume),
+                      partial=partial, duration_sec=time.monotonic() - started)
 
 
 def _write_json(path: Path, data: dict) -> None:

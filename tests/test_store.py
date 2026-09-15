@@ -113,3 +113,86 @@ def test_schedule_table_accepts_a_row(store):
     rows = store.list_schedule()
     assert rows[0]["spec"] == "07:00"
     assert rows[0]["enabled"] == 1
+
+
+# --- этап 2: сессия связки, восстановление после перезагрузки, история работ ----
+
+def test_session_is_marked_as_started_only_after_the_first_work(store):
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter", session_id="s-1")
+    assert link["session_started"] == 0
+    store.mark_session_started(link["id"])
+    assert store.get_link("telegram", 500, 0)["session_started"] == 1
+
+
+def test_new_session_replaces_the_old_key_and_forgets_that_it_was_started(store):
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter", session_id="s-1")
+    store.mark_session_started(link["id"])
+    store.reset_session(link["id"], "s-2")
+    again = store.get_link("telegram", 500, 0)
+    assert again["session_id"] == "s-2"
+    assert again["session_started"] == 0
+
+
+def test_old_base_without_the_new_columns_is_upgraded_not_broken(home):
+    import sqlite3
+    path = home / "most.db"
+    db = sqlite3.connect(path)
+    db.executescript("""
+        CREATE TABLE links (id INTEGER PRIMARY KEY AUTOINCREMENT, channel TEXT,
+            chat_id INTEGER, thread_id INTEGER DEFAULT 0, project TEXT, session_id TEXT,
+            title TEXT, created_at TEXT, last_job_at TEXT, state TEXT DEFAULT 'idle');
+        INSERT INTO links(channel, chat_id, thread_id, project, session_id, created_at)
+            VALUES('telegram', 500, 0, 'buhgalter', 's-1', '2026-09-15T00:00:00+00:00');
+    """)
+    db.commit()
+    db.close()
+
+    s = Store(path).init()
+    link = s.get_link("telegram", 500, 0)
+    assert link["project"] == "buhgalter"          # старые данные на месте
+    assert link["session_started"] == 0            # новая колонка появилась
+    s.close()
+
+
+def test_running_jobs_become_interrupted_after_a_restart(store):
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter")
+    job_id = store.start_job(link["id"], "telegram", 500, "s-1",
+                             "посчитай остатки за август", "")
+    left = store.mark_running_interrupted()
+    assert [row["id"] for row in left] == [job_id]
+    assert store.get_job(job_id)["state"] == "interrupted"
+    # второй запуск уже ничего не находит — сообщение не повторяется
+    assert store.mark_running_interrupted() == []
+
+
+def test_finished_job_keeps_how_long_it_took_and_what_came_out(store):
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter")
+    job_id = store.start_job(link["id"], "telegram", 500, "s-1", "посчитай", "")
+    store.set_job_dir(job_id, "/tmp/jobs/1")
+    store.finish_job(job_id, "done", exit_code=0, duration_sec=12.5, result_head="Остатки: 17")
+    row = store.get_job(job_id)
+    assert row["duration_sec"] == 12.5
+    assert row["result_head"] == "Остатки: 17"
+    assert row["dir"] == "/tmp/jobs/1"
+
+
+def test_link_history_is_newest_first_and_limited(store):
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter")
+    other = store.upsert_link("max", 900, 0, project="analitika")
+    for n in range(7):
+        job_id = store.start_job(link["id"], "telegram", 500, "s-1", f"задача {n}", "")
+        store.finish_job(job_id, "done", exit_code=0, duration_sec=n)
+    store.start_job(other["id"], "max", 900, "s-2", "чужая задача", "")
+
+    rows = store.jobs_of_link(link["id"], limit=5)
+    assert len(rows) == 5
+    assert rows[0]["prompt_head"] == "задача 6"
+    assert all("чужая" not in r["prompt_head"] for r in rows)
+
+
+def test_last_finished_job_of_a_link_skips_the_running_one(store):
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter")
+    done = store.start_job(link["id"], "telegram", 500, "s-1", "первая", "")
+    store.finish_job(done, "done", exit_code=0)
+    store.start_job(link["id"], "telegram", 500, "s-1", "вторая, ещё идёт", "")
+    assert store.last_finished_job(link["id"])["id"] == done

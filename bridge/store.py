@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS links (
     created_at    TEXT    NOT NULL,
     last_job_at   TEXT,
     state         TEXT    NOT NULL DEFAULT 'idle',
+    session_started INTEGER NOT NULL DEFAULT 0,
     UNIQUE (channel, chat_id, thread_id)
 );
 
@@ -72,7 +73,9 @@ CREATE TABLE IF NOT EXISTS jobs (
     state         TEXT    NOT NULL,
     started_at    TEXT    NOT NULL,
     finished_at   TEXT,
-    exit_code     INTEGER
+    exit_code     INTEGER,
+    duration_sec  REAL,
+    result_head   TEXT
 );
 
 CREATE INDEX IF NOT EXISTS journal_at ON journal (at DESC);
@@ -80,6 +83,23 @@ CREATE INDEX IF NOT EXISTS jobs_started ON jobs (started_at DESC);
 """
 
 KNOCK_TEXT_LIMIT = 40
+RESULT_HEAD_LIMIT = 200
+
+# Колонки, которые появились позже первой версии. База у ученика уже живёт,
+# и ронять её ради нового поля нельзя: добираем недостающее на месте.
+LATE_COLUMNS = {
+    "links": [("session_started", "INTEGER NOT NULL DEFAULT 0")],
+    "jobs": [("duration_sec", "REAL"), ("result_head", "TEXT")],
+}
+
+# Состояния работы. Живая одна, остальные — чем всё кончилось.
+JOB_RUNNING = "running"
+JOB_DONE = "done"
+JOB_FAILED = "failed"
+JOB_TIMEOUT = "timeout"
+JOB_STOPPED = "stopped"
+JOB_INTERRUPTED = "interrupted"
+JOB_FINISHED_STATES = (JOB_DONE, JOB_FAILED, JOB_TIMEOUT, JOB_STOPPED, JOB_INTERRUPTED)
 
 
 def now_iso() -> str:
@@ -107,7 +127,19 @@ class Store:
 
     def init(self) -> "Store":
         self.db.executescript(SCHEMA)
+        self._add_late_columns()
         return self
+
+    def _add_late_columns(self) -> None:
+        """Догоняем базу, заведённую прошлой версией моста: ALTER вместо переезда."""
+        for table, columns in LATE_COLUMNS.items():
+            if table not in self.table_names():
+                continue
+            have = {row["name"] for row in
+                    self.db.execute(f"PRAGMA table_info({table})").fetchall()}
+            for name, kind in columns:
+                if name not in have:
+                    self.db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {kind}")
 
     def close(self) -> None:
         if self._db is not None:
@@ -165,6 +197,18 @@ class Store:
                 "UPDATE links SET project=? WHERE channel=? AND chat_id=? AND thread_id=?",
                 (project, channel, chat_id, thread_id))
 
+    def mark_session_started(self, link_id: int) -> None:
+        """Сессия нейросети заведена: со следующего раза продолжаем разговор."""
+        self.db.execute("UPDATE links SET session_started=1 WHERE id=?", (link_id,))
+
+    def reset_session(self, link_id: int, session_id: str) -> None:
+        """Новый разговор в той же папке: ключ другой, продолжать нечего."""
+        self.db.execute("UPDATE links SET session_id=?, session_started=0 WHERE id=?",
+                        (session_id, link_id))
+
+    def get_link_by_id(self, link_id: int):
+        return self.db.execute("SELECT * FROM links WHERE id=?", (link_id,)).fetchone()
+
     def touch_link(self, link_id: int, state: str = "idle") -> None:
         self.db.execute("UPDATE links SET last_job_at=?, state=? WHERE id=?",
                         (now_iso(), state, link_id))
@@ -218,12 +262,47 @@ class Store:
             "INSERT INTO jobs(id, link_id, channel, chat_id, session_id, prompt_head, dir, "
             "state, started_at) VALUES(?,?,?,?,?,?,?,?,?)",
             (job_id, link_id, channel, chat_id, session_id, (prompt or "")[:200],
-             job_dir, "running", now_iso()))
+             job_dir, JOB_RUNNING, now_iso()))
         return job_id
 
-    def finish_job(self, job_id: str, state: str, exit_code: int | None = None) -> None:
-        self.db.execute("UPDATE jobs SET state=?, exit_code=?, finished_at=? WHERE id=?",
-                        (state, exit_code, now_iso(), job_id))
+    def finish_job(self, job_id: str, state: str, exit_code: int | None = None,
+                   duration_sec: float | None = None, result_head: str | None = None) -> None:
+        head = (result_head or "").strip().replace("\n", " ")[:RESULT_HEAD_LIMIT] or None
+        self.db.execute(
+            "UPDATE jobs SET state=?, exit_code=?, finished_at=?, duration_sec=?, "
+            "result_head=COALESCE(?, result_head) WHERE id=?",
+            (state, exit_code, now_iso(), duration_sec, head, job_id))
+
+    def set_job_dir(self, job_id: str, job_dir: str) -> None:
+        """Папку журнала знает только исполнитель — записываем, когда он её завёл."""
+        self.db.execute("UPDATE jobs SET dir=? WHERE id=?", (str(job_dir), job_id))
+
+    def mark_running_interrupted(self) -> list:
+        """После перезагрузки: всё, что значилось работающим, работать уже не может.
+
+        Возвращает прерванные работы — по ним мост говорит в чат честное
+        «меня прервали», а не молчит. Второй раз те же работы не вернутся.
+        """
+        rows = self.db.execute(
+            "SELECT * FROM jobs WHERE state=? ORDER BY started_at", (JOB_RUNNING,)).fetchall()
+        if rows:
+            self.db.execute(
+                "UPDATE jobs SET state=?, finished_at=? WHERE state=?",
+                (JOB_INTERRUPTED, now_iso(), JOB_RUNNING))
+            self.db.execute("UPDATE links SET state='idle' WHERE state<>'idle'")
+        return list(rows)
+
+    def jobs_of_link(self, link_id: int, limit: int = 5):
+        return self.db.execute(
+            "SELECT * FROM jobs WHERE link_id=? ORDER BY started_at DESC, rowid DESC LIMIT ?",
+            (link_id, limit)).fetchall()
+
+    def last_finished_job(self, link_id: int):
+        marks = ",".join("?" * len(JOB_FINISHED_STATES))
+        return self.db.execute(
+            f"SELECT * FROM jobs WHERE link_id=? AND state IN ({marks}) "
+            "ORDER BY started_at DESC, rowid DESC LIMIT 1",
+            (link_id, *JOB_FINISHED_STATES)).fetchone()
 
     def get_job(self, job_id: str):
         return self.db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()

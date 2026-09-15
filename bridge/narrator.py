@@ -77,6 +77,18 @@ def final_text(events: list[dict]) -> str:
     return texts.WORK_EMPTY_ANSWER
 
 
+def partial_text(events: list[dict], limit: int = 1500) -> str:
+    """Что нейросеть успела сказать до остановки: её реплики по ходу работы.
+
+    Нужно там, где итога нет вовсе, — «стоп» и упёршийся бюджет времени.
+    """
+    said = [t for t in assistant_texts(events) if t]
+    if not said:
+        return ""
+    out = "\n\n".join(said).strip()
+    return out if len(out) <= limit else out[:limit].rstrip() + "…"
+
+
 def chunk(text: str, limit: int) -> list[str]:
     """Режет текст под лимит: по строкам, а если строка сама длиннее — насильно.
 
