@@ -47,6 +47,9 @@ class Work:
     resume: bool
     started_at: float
     handle: RunHandle
+    # Монотонные часы не годятся, когда надо спросить «что в папке новее начала
+    # работы»: у них своё начало отсчёта. Держим рядом и настенное время.
+    started_wall: float = 0.0
     result: Result | None = None
     session_restarted: bool = False      # прошлый разговор не нашёлся, завели новый
     stop_asked: bool = False
@@ -108,7 +111,8 @@ class WorkPool:
             work = Work(key=key, job_id=job_id, link_id=link["id"], channel=channel,
                         chat_id=int(chat_id), prompt=prompt, workdir=Path(workdir),
                         session_id=session_id, resume=bool(resume),
-                        started_at=time.monotonic(), handle=self.executor.new_handle())
+                        started_at=time.monotonic(), handle=self.executor.new_handle(),
+                        started_wall=time.time())
             self._running[key] = work
 
         self.store.touch_link(link["id"], state="working")

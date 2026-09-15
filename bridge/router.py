@@ -22,14 +22,19 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import changes, narrator, texts
+from . import changes, narrator, postman, texts
 from .executor import Executor
-from .receivers.base import Incoming
+from .receivers.base import FileTooBig, Incoming
 from .works import WorkPool
 
 MOSCOW = timezone(timedelta(hours=3))
 
 LIMITS = {"telegram": narrator.TELEGRAM_LIMIT, "max": narrator.MAX_LIMIT}
+CHANNEL_NAMES = {"telegram": "телеграм", "max": "Max"}
+
+# Ключи в settings: чем платить за две колонки в базе, если хватает двух строк.
+LAST_INCOMING_KEY = "last_incoming:{link_id}"
+RESULT_FILE_KEY = "result_file:{link_id}"
 
 SWITCH_RE = re.compile(r"^\s*(?:работаем|работай|переходим|перейди)\s+"
                        r"(?:с|со|в|на)\s+(?:папкой\s+|проектом\s+)?[«\"']?(?P<name>[^«»\"']+?)[»\"']?\s*$",
@@ -46,6 +51,21 @@ HISTORY_RE = re.compile(r"что\s+ты\s+(?:делал|сделал)|"
                         r"(?:покажи|последние)\s+(?:мои\s+)?(?:работ|задач)|"
                         r"чем\s+ты\s+занимал", re.IGNORECASE)
 PROJECTS_RE = re.compile(r"(?:покажи|какие|список)\s+(?:мои\s+)?(?:проект|папк)", re.IGNORECASE)
+# «Отдай» — про результат последней работы; отдельно и строго, чтобы не съесть
+# «отдай мне смету»: там человек называет файл, и это уже другая команда.
+RESULT_RE = re.compile(r"^\s*(?:отдай|отдать|отдавай|"
+                       r"(?:пришли|скинь|отправь|вышли)\s+(?:мне\s+)?"
+                       r"(?:результат|что\s+получилось))\s*[.!]?\s*$", re.IGNORECASE)
+SEND_FILE_RE = re.compile(r"^\s*(?:пришли|при[сш]ылай|отправь|скинь|кинь|вышли|отдай|дай)\s+"
+                          r"(?P<name>.+?)\s*[.!?]?\s*$", re.IGNORECASE)
+WHERE_FILE_RE = re.compile(r"куда\s+(?:ты\s+)?(?:её|его|их)?\s*"
+                           r"(?:положила|поло[жд]ил|сохранила|дела|убрала)", re.IGNORECASE)
+# Слова, которые в просьбе «пришли мне …» именем файла не являются.
+FILE_STOPWORDS = {"мне", "сюда", "нам", "файл", "файлик", "документ", "этот", "тот",
+                  "эту", "ту", "это", "его", "её", "ее", "их", "пожалуйста", "плз",
+                  "ещё", "еще", "раз", "обратно", "назад", "в", "чат", "скорее"}
+# А эти — вовсе не про файлы: «пришли ответ целиком ещё раз» — это про сообщение.
+NOT_A_FILE = {"ответ", "ответы", "сообщение", "сообщения", "текст", "смс", "письмо"}
 HELP_RE = re.compile(r"^\s*(?:/?help|/start|помощь|что\s+ты\s+умеешь)\s*$", re.IGNORECASE)
 
 
@@ -88,10 +108,14 @@ def how_long(seconds) -> str:
 
 
 class Router:
-    def __init__(self, config, store, executor: Executor, pool: WorkPool | None = None):
+    def __init__(self, config, store, executor: Executor, pool: WorkPool | None = None,
+                 postbox=None):
         self.config = config
         self.store = store
         self.executor = executor
+        # Почтовый ящик — мост целиком: через него уходит то, что мост шлёт сам,
+        # во все настроенные мессенджеры разом (сводки и «отдай»).
+        self.postbox = postbox
         self.pool = pool or WorkPool(executor=executor, store=store,
                                      max_parallel=getattr(config, "parallel", 1))
 
@@ -110,8 +134,12 @@ class Router:
 
     # --- главный вход -------------------------------------------------------
 
-    def handle(self, incoming: Incoming) -> list[str]:
-        """Возвращает готовые сообщения в тот же канал. Пустой список = молчим."""
+    def handle(self, incoming: Incoming, receiver=None) -> list[str]:
+        """Возвращает готовые сообщения в тот же канал. Пустой список = молчим.
+
+        `receiver` нужен там, где ответ — не текст, а файл: скачать присланное
+        и отправить своё умеет только он. Зовётся из главного потока.
+        """
         text = (incoming.text or "").strip()
 
         if not self.store.is_allowed(incoming.channel, incoming.user_id):
@@ -120,10 +148,22 @@ class Router:
                                      incoming.user_id, text)
             return []
 
+        limit = LIMITS.get(incoming.channel, narrator.TELEGRAM_LIMIT)
+
+        if getattr(incoming, "attachments", None):
+            return self._incoming_files(incoming, receiver, limit)
+
         if not text:
             return []
 
-        limit = LIMITS.get(incoming.channel, narrator.TELEGRAM_LIMIT)
+        if WHERE_FILE_RE.search(text):
+            return narrator.chunk(self._where_is_the_file(incoming), limit)
+        if RESULT_RE.match(text):
+            return narrator.chunk(self._give_result(incoming, receiver), limit)
+        send_file = SEND_FILE_RE.match(text)
+        if send_file and _looks_like_a_file_request(send_file.group("name")):
+            return narrator.chunk(
+                self._send_named_file(incoming, receiver, send_file.group("name")), limit)
 
         if HELP_RE.match(text):
             return narrator.chunk(texts.HELP, limit)
@@ -266,6 +306,143 @@ class Router:
                 prompt=(row["prompt_head"] or "")[:60]))
         return "\n".join(lines)
 
+    # --- этап 3: файлы туда и обратно ---------------------------------------
+
+    def _workdir_of(self, incoming: Incoming):
+        """Папка проекта этой связки. None — значит, работать негде."""
+        link = self._link_with_project(incoming)
+        if link is None:
+            return None, None
+        return link, Path(self.config.projects_dir) / link["project"]
+
+    def _incoming_files(self, incoming: Incoming, receiver, limit: int) -> list[str]:
+        """Присланное человеком: кладём в «входящие», подпись — это задание."""
+        link, workdir = self._workdir_of(incoming)
+        if link is None:
+            return narrator.chunk(texts.PROJECT_NONE, limit)
+        if receiver is None:                       # некому качать — честно молчим в журнал
+            self.store.note("error", channel=incoming.channel, chat_id=incoming.chat_id,
+                            text="файл пришёл, а приёмника нет — забрать нечем")
+            return []
+
+        said: list[str] = []
+        saved: list[Path] = []
+        channel = CHANNEL_NAMES.get(incoming.channel, incoming.channel)
+        for attachment in incoming.attachments:
+            name = attachment.file_name or "файл"
+            try:
+                body = receiver.fetch(attachment)
+            except FileTooBig as too_big:
+                said.append(texts.FILE_TOO_BIG_IN.format(
+                    name=name, channel=channel,
+                    size=postman.human_size(too_big.size or attachment.size),
+                    limit=postman.human_size(too_big.limit or receiver.download_limit)))
+                continue
+            except Exception as exc:               # noqa: BLE001
+                self.store.note("error", channel=incoming.channel,
+                                chat_id=incoming.chat_id, text=str(exc)[:200])
+                said.append(texts.FILE_NOT_TAKEN.format(name=name))
+                continue
+
+            path = postman.save_incoming(workdir, attachment.file_name, body,
+                                         kind=attachment.kind)
+            saved.append(path)
+            self.store.set_setting(LAST_INCOMING_KEY.format(link_id=link["id"]), str(path))
+            said.append(texts.FILE_SAVED.format(folder=postman.INBOX, name=path.name,
+                                                size=postman.human_size(len(body))))
+
+        caption = (incoming.text or "").strip()
+        if saved and caption:
+            # Подпись к файлу — это задание про него: запускаем работу сразу.
+            prompt = texts.FILE_TASK_PROMPT.format(caption=caption, path=saved[-1])
+            said += self._work(incoming, prompt, limit)
+        elif saved:
+            said.append(texts.FILE_SAVED_WHERE.format(path=saved[-1]))
+
+        return narrator.chunk("\n\n".join(s for s in said if s), limit)
+
+    def _where_is_the_file(self, incoming: Incoming) -> str:
+        """«Куда ты положила то, что я прислала» — мост отвечает сам, по своей записи."""
+        link = self.store.get_link(incoming.channel, incoming.chat_id, incoming.thread_id)
+        path = self.store.get_setting(
+            LAST_INCOMING_KEY.format(link_id=link["id"])) if link else None
+        if not path:
+            return texts.WHERE_IS_THE_FILE_NONE.format(folder=postman.INBOX)
+        return texts.WHERE_IS_THE_FILE.format(path=path)
+
+    def _send_named_file(self, incoming: Incoming, receiver, name: str) -> str:
+        """«Пришли мне отчёт»: ищет сам мост, без нейросети."""
+        link, workdir = self._workdir_of(incoming)
+        if link is None:
+            return texts.PROJECT_NONE
+
+        query = _file_query(name)
+        found = postman.find_files(workdir, query) if query else []
+        if len(found) == 1:
+            return self._hand_over(incoming, receiver, found[0], workdir,
+                                   texts.HERE_IS_RESULT.format(name=found[0].name))
+        if len(found) > 1:
+            return texts.FILE_WHICH_ONE.format(found=_file_lines(found, workdir))
+
+        recent = postman.recent_files(workdir)
+        if not recent:
+            return texts.FILE_FOLDER_EMPTY.format(project=link["project"])
+        if not query:
+            return texts.FILE_WHICH_ONE_EXACTLY.format(found=_file_lines(recent, workdir))
+        return texts.FILE_NOT_FOUND.format(project=link["project"],
+                                           found=_file_lines(recent, workdir))
+
+    def _give_result(self, incoming: Incoming, receiver) -> str:
+        """«Отдай»: последний файл, который нейросеть назвала и правда изменила."""
+        link, workdir = self._workdir_of(incoming)
+        if link is None:
+            return texts.PROJECT_NONE
+        raw = self.store.get_setting(RESULT_FILE_KEY.format(link_id=link["id"]))
+        if not raw:
+            return texts.RESULT_FILE_UNKNOWN
+        path = Path(raw)
+        if not path.exists():
+            return texts.RESULT_FILE_GONE.format(name=path.name)
+        return self._hand_over(incoming, receiver, path, workdir,
+                               texts.HERE_IS_RESULT.format(name=path.name), everywhere=True)
+
+    def _hand_over(self, incoming: Incoming, receiver, path: Path, workdir,
+                   caption: str, everywhere: bool = False) -> str:
+        """Отдаёт файл человеку. Спросили в одном — отвечаем там же.
+
+        «Отдай» — другое дело: это то, что мост присылает сам, и уходит оно
+        во все настроенные мессенджеры (решение про два входа).
+        """
+        channel = CHANNEL_NAMES.get(incoming.channel, incoming.channel)
+        if everywhere and self.postbox is not None:
+            try:
+                if self.postbox.broadcast(caption, file=path):
+                    return ""
+            except FileTooBig as too_big:
+                return texts.FILE_TOO_BIG_OUT.format(
+                    name=path.name, channel=channel,
+                    size=postman.human_size(too_big.size or postman.size_of(path)),
+                    limit=postman.human_size(too_big.limit), path=path)
+            except Exception as exc:                # noqa: BLE001
+                self.store.note("error", channel=incoming.channel, text=str(exc)[:200])
+            return texts.FILE_NOT_SENT.format(path=path)
+
+        if receiver is None:
+            return texts.FILE_NOT_SENT.format(path=path)
+        try:
+            receiver.send_file(incoming.chat_id, path, caption=caption)
+        except FileTooBig as too_big:
+            return texts.FILE_TOO_BIG_OUT.format(
+                name=path.name, channel=channel,
+                size=postman.human_size(too_big.size or postman.size_of(path)),
+                limit=postman.human_size(too_big.limit or receiver.upload_limit),
+                path=path)
+        except Exception as exc:                    # noqa: BLE001
+            self.store.note("error", channel=incoming.channel, chat_id=incoming.chat_id,
+                            text=str(exc)[:200])
+            return texts.FILE_NOT_SENT.format(path=path)
+        return ""                                   # файл ушёл, подпись при нём
+
     # --- работа -------------------------------------------------------------
 
     def _link_with_project(self, incoming: Incoming):
@@ -331,11 +508,52 @@ class Router:
         else:
             parts.append(result.text or narrator.final_text(result.events)
                          or texts.WORK_EMPTY_ANSWER)
+            hint = self._remember_result_file(work, result)
+            if hint:
+                parts.append(hint)
 
         return narrator.chunk("\n\n".join(p for p in parts if p), limit) \
             or [texts.WORK_EMPTY_ANSWER]
+
+    def _remember_result_file(self, work, result) -> str:
+        """Если нейросеть назвала файл и он правда изменился — запоминаем его.
+
+        Дальше хватает одного слова «отдай»: мост знает, что присылать.
+        Проверяем не словам, а папке — тем же `changes.py`, что и
+        «покажи, что получилось».
+        """
+        try:
+            found = changes.mentioned_files(result.text or "", work.workdir,
+                                            since=work.started_wall)
+        except Exception:                           # noqa: BLE001
+            return ""
+        if not found:
+            return ""
+        self.store.set_setting(RESULT_FILE_KEY.format(link_id=work.link_id), str(found[0]))
+        return texts.RESULT_FILE_HINT.format(name=found[0].name)
 
     @staticmethod
     def _managed(result) -> str:
         partial = (result.partial or "").strip()
         return texts.WHAT_MANAGED.format(partial=partial) if partial else texts.NOTHING_MANAGED
+
+
+def _file_query(name: str) -> str:
+    """Из просьбы «пришли мне этот файл» остаётся пусто, из «пришли смету» — «смету»."""
+    words = [w for w in re.split(r"\s+", (name or "").strip().strip("«»\"'")) if w]
+    kept = [w for w in words if w.lower().strip(".,!?«»\"'") not in FILE_STOPWORDS]
+    return " ".join(kept)
+
+
+def _looks_like_a_file_request(name: str) -> bool:
+    """«Пришли ответ целиком ещё раз» — это не про файл, а про сообщение."""
+    query = _file_query(name)
+    if not query:
+        return True                       # «пришли мне этот файл» — спросим, какой
+    first = query.split()[0].lower().strip(".,!?«»\"'")
+    return first not in NOT_A_FILE
+
+
+def _file_lines(paths, workdir) -> str:
+    return "\n".join(texts.FILE_LINE.format(name=postman.relative(p, workdir))
+                     for p in paths)

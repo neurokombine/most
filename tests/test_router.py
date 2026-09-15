@@ -1,8 +1,10 @@
 """Маршрутизатор: белый список, журнал чужих стуков, проект на связку, команды."""
 import pytest
 
+from pathlib import Path
+
 from bridge.executor import FakeExecutor, Result
-from bridge.receivers.base import Incoming
+from bridge.receivers.base import Attachment, FileTooBig, Incoming
 from bridge.router import Router
 
 
@@ -310,3 +312,270 @@ def test_short_budget_is_told_in_seconds_not_in_one_minute(config, store):
     text = "\n".join(done(r, tg("посчитай")))
     assert "за 10 с" in text
     assert "1 мин" not in text
+
+
+# --- этап 3: файлы туда и обратно -------------------------------------------
+
+class FakeReceiver:
+    """Приёмник для тестов: файлы «скачивает» из памяти и складывает отправленное."""
+
+    channel = "telegram"
+    limit = 4096
+    download_limit = 20 * 1024 * 1024
+    upload_limit = 50 * 1024 * 1024
+
+    def __init__(self, body=b"body", trouble=None):
+        self.body = body
+        self.trouble = trouble
+        self.sent_files = []
+        self.sent_texts = []
+
+    def fetch(self, attachment):
+        if self.trouble is not None:
+            raise self.trouble
+        return self.body
+
+    def send(self, chat_id, text):
+        self.sent_texts.append((chat_id, text))
+
+    def send_file(self, chat_id, path, caption=""):
+        self.sent_files.append((chat_id, Path(path), caption))
+
+
+class FakePostbox:
+    """Мост, умеющий говорить во все настроенные каналы разом."""
+
+    def __init__(self, delivered=2):
+        self.delivered = delivered
+        self.calls = []
+
+    def broadcast(self, text, file=None):
+        self.calls.append((text, Path(file) if file else None))
+        return self.delivered
+
+
+def with_file(name="отчёт.xlsx", size=1024, caption="", channel="telegram"):
+    att = Attachment(kind="file", file_id="f1", file_name=name, size=size)
+    return Incoming(channel=channel, chat_id=500, user_id=111, text=caption,
+                    thread_id=0, raw={}, attachments=[att])
+
+
+def project_dir(router):
+    return Path(router.config.projects_dir) / router.default_project()
+
+
+def test_sent_file_lands_in_the_russian_folder(router):
+    receiver = FakeReceiver(body=b"12345")
+    answers = router.handle(with_file(), receiver=receiver)
+    saved = project_dir(router) / "входящие" / "отчёт.xlsx"
+    assert saved.exists()
+    assert saved.read_bytes() == b"12345"
+    said = "\n".join(answers)
+    assert "входящие" in said and "отчёт.xlsx" in said
+
+
+def test_the_answer_names_the_size(router):
+    answers = router.handle(with_file(size=1024), receiver=FakeReceiver(body=b"x" * 2048))
+    assert "2 КБ" in "\n".join(answers)
+
+
+def test_cyrillic_project_folder_works(config, store, tmp_path):
+    projects = tmp_path / "проекты мои"
+    (projects / "бухгалтерия за год").mkdir(parents=True)
+    config.projects_dir = projects
+    store.sync_allowlist("telegram", config.telegram.allowlist)
+    r = Router(config=config, store=store, executor=FakeExecutor())
+    r.handle(with_file(name="акт сверки.pdf"), receiver=FakeReceiver())
+    assert (projects / "бухгалтерия за год" / "входящие" / "акт сверки.pdf").exists()
+    r.pool.stop_all()
+
+
+def test_caption_becomes_a_task_with_the_path_inside(router):
+    answers = router.handle(with_file(caption="посчитай итог по этой таблице"),
+                            receiver=FakeReceiver())
+    router.pool.wait_idle()
+    prompt = router.executor.calls[0]["prompt"]
+    assert "посчитай итог по этой таблице" in prompt
+    assert "отчёт.xlsx" in prompt
+    assert "входящие" in prompt
+    assert "работу" in "\n".join(answers)          # и сказали, что взяли в работу
+
+
+def test_file_without_a_caption_starts_no_work(router):
+    router.handle(with_file(), receiver=FakeReceiver())
+    router.pool.wait_idle()
+    assert router.executor.calls == []
+
+
+def test_file_too_big_is_told_honestly_and_nothing_is_saved(router):
+    receiver = FakeReceiver(trouble=FileTooBig("не пущу", size=30 * 1024 * 1024,
+                                               limit=20 * 1024 * 1024))
+    answers = router.handle(with_file(size=30 * 1024 * 1024), receiver=receiver)
+    said = "\n".join(answers)
+    assert "20" in said
+    assert not (project_dir(router) / "входящие").exists()
+
+
+def test_trouble_while_taking_the_file_is_said_without_the_token(router, store):
+    receiver = FakeReceiver(trouble=RuntimeError("не смог забрать файл: код 500"))
+    answers = router.handle(with_file(), receiver=receiver)
+    assert answers
+    assert "код 500" not in "\n".join(answers)      # человеку — по-человечески
+    assert store.recent_journal()
+
+
+def test_where_did_you_put_it_is_answered_by_the_bridge_itself(router):
+    router.handle(with_file(name="смета.pdf"), receiver=FakeReceiver())
+    answers = router.handle(tg("куда ты положила то, что я прислала"),
+                            receiver=FakeReceiver())
+    said = "\n".join(answers)
+    assert "смета.pdf" in said
+    assert "входящие" in said
+    assert router.executor.calls == []              # нейросеть для этого не нужна
+
+
+# --- «пришли мне <файл>» ----------------------------------------------------
+
+def make_file(router, name, body="x"):
+    path = project_dir(router) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_send_me_the_file_finds_it_by_part_of_the_name(router):
+    make_file(router, "Отчёт-Сентябрь.xlsx")
+    receiver = FakeReceiver()
+    router.handle(tg("пришли мне отчёт"), receiver=receiver)
+    assert len(receiver.sent_files) == 1
+    assert receiver.sent_files[0][1].name == "Отчёт-Сентябрь.xlsx"
+    assert router.executor.calls == []              # это делает сам мост
+
+
+def test_two_matches_ask_which_one(router):
+    make_file(router, "отчёт-август.xlsx")
+    make_file(router, "отчёт-сентябрь.xlsx")
+    receiver = FakeReceiver()
+    answers = router.handle(tg("пришли мне отчёт"), receiver=receiver)
+    said = "\n".join(answers)
+    assert receiver.sent_files == []
+    assert "отчёт-август.xlsx" in said and "отчёт-сентябрь.xlsx" in said
+
+
+def test_nothing_found_shows_what_there_is(router):
+    make_file(router, "смета.pdf")
+    answers = router.handle(tg("пришли мне накладную"), receiver=FakeReceiver())
+    said = "\n".join(answers)
+    assert "не нашла" in said.lower()
+    assert "смета.pdf" in said
+
+
+def test_file_without_a_name_asks_which_one(router):
+    make_file(router, "смета.pdf")
+    receiver = FakeReceiver()
+    answers = router.handle(tg("пришли мне этот файл"), receiver=receiver)
+    assert receiver.sent_files == []
+    assert "смета.pdf" in "\n".join(answers)        # показали, из чего выбирать
+
+
+def test_a_file_too_big_for_the_messenger_leaves_the_path(router):
+    make_file(router, "большой.bin")
+    receiver = FakeReceiver()
+    receiver.send_file = _refuse(FileTooBig("не пущу", size=60 * 1024 * 1024,
+                                            limit=50 * 1024 * 1024))
+    answers = router.handle(tg("пришли мне большой"), receiver=receiver)
+    said = "\n".join(answers)
+    assert "большой.bin" in said                    # путь на сервере назвали
+    assert "50" in said
+
+
+def _refuse(trouble):
+    def refuse(*args, **kwargs):
+        raise trouble
+    return refuse
+
+
+def test_asking_for_a_file_in_an_empty_project_says_so(config, store, tmp_path):
+    config.projects_dir = tmp_path / "пусто"
+    store.sync_allowlist("telegram", config.telegram.allowlist)
+    r = Router(config=config, store=store, executor=FakeExecutor())
+    answers = r.handle(tg("пришли мне отчёт"), receiver=FakeReceiver())
+    assert answers
+    r.pool.stop_all()
+
+
+def test_a_question_about_the_answer_is_not_a_file_request(router):
+    router.handle(tg("пришли ответ целиком ещё раз"), receiver=FakeReceiver())
+    router.pool.wait_idle()
+    assert router.executor.calls          # ушло нейросети, а не в поиск файла
+
+
+# --- «отдай» ----------------------------------------------------------------
+
+def finish_work(router, text, creates=None):
+    """Прогоняет одну работу с готовым ответом нейросети.
+
+    Файл появляется ПОСЛЕ начала работы — как в жизни: мост верит папке,
+    а не словам, и файл «старее» работы результатом не считается.
+    """
+    router.executor.text = text
+    router.handle(tg("сделай отчёт"))
+    if creates:
+        make_file(router, creates)
+    router.pool.wait_idle()
+    out = []
+    for work in router.pool.collect():
+        out += router.finished_messages(work)
+    return out
+
+
+def test_the_bridge_remembers_the_file_the_neural_net_named(router):
+    answers = finish_work(router, "Готово, сложила всё в итог-сентября.xlsx",
+                          creates="итог-сентября.xlsx")
+    assert "итог-сентября.xlsx" in "\n".join(answers)
+    assert "отдай" in "\n".join(answers).lower()
+
+
+def test_give_it_to_me_sends_the_last_result_into_every_messenger(router):
+    finish_work(router, "Готово, сложила всё в итог-сентября.xlsx",
+                creates="итог-сентября.xlsx")
+    postbox = FakePostbox()
+    router.postbox = postbox
+    router.handle(tg("отдай"), receiver=FakeReceiver())
+    assert len(postbox.calls) == 1
+    assert postbox.calls[0][1].name == "итог-сентября.xlsx"
+
+
+def test_give_it_to_me_without_a_result_asks_for_a_name(router):
+    receiver = FakeReceiver()
+    answers = router.handle(tg("отдай"), receiver=receiver)
+    assert receiver.sent_files == []
+    assert "пришли" in "\n".join(answers).lower()
+
+
+def test_give_me_the_result_is_the_same_command(router):
+    finish_work(router, "Готово, файл итог.xlsx лежит в папке", creates="итог.xlsx")
+    postbox = FakePostbox()
+    router.postbox = postbox
+    router.handle(tg("пришли результат"), receiver=FakeReceiver())
+    assert postbox.calls
+
+
+def test_a_named_file_goes_only_where_it_was_asked(router):
+    make_file(router, "смета.pdf")
+    postbox = FakePostbox()
+    router.postbox = postbox
+    receiver = FakeReceiver()
+    router.handle(tg("пришли мне смету"), receiver=receiver)
+    assert postbox.calls == []              # спросили в одном — ответ там же
+    assert len(receiver.sent_files) == 1
+
+
+def test_a_file_only_promised_is_not_remembered(router):
+    """Сказала «сохранила в отчёт.xlsx», а файла нет — отдавать нечего."""
+    answers = finish_work(router, "Готово, сохранила всё в отчёт.xlsx")
+    assert "отдай" not in "\n".join(answers).lower()
+    receiver = FakeReceiver()
+    later = router.handle(tg("отдай"), receiver=receiver)
+    assert receiver.sent_files == []
+    assert "пришли" in "\n".join(later).lower()

@@ -113,6 +113,21 @@ def _words(text: str) -> list[str]:
     return [w for w in _plain(text).split() if w]
 
 
+def _matches(word: str, haystack: str) -> bool:
+    """Слово из просьбы против имени файла — с поправкой на падежи.
+
+    Человек пишет «пришли мне смету», а файл называется «смета.pdf».
+    Разбирать русскую морфологию ради этого незачем: хвост в одну-две буквы
+    отрезается и попадает точно так же, а лишние совпадения не страшны —
+    на несколько найденных мост переспрашивает, какой именно.
+    """
+    if word in haystack:
+        return True
+    if len(word) >= 5 and word[:-1] in haystack:
+        return True
+    return len(word) >= 6 and word[:-2] in haystack
+
+
 def walk_files(workdir: Path | str):
     """Файлы папки проекта без служебного мусора: .git, venv, node_modules."""
     import os
@@ -137,13 +152,13 @@ def find_files(workdir: Path | str, query: str, limit: int = FIND_LIMIT) -> list
     found: list[tuple[float, Path]] = []
     for path in walk_files(workdir):
         haystack = _plain(path.name)
-        if not all(word in haystack for word in words):
+        if not all(_matches(word, haystack) for word in words):
             # Слова могли разъехаться по папке и имени: «отчёты/сентябрь.xlsx».
             try:
                 haystack = _plain(path.relative_to(Path(workdir)).as_posix())
             except ValueError:
                 continue
-            if not all(word in haystack for word in words):
+            if not all(_matches(word, haystack) for word in words):
                 continue
         try:
             found.append((path.stat().st_mtime, path))

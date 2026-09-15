@@ -43,3 +43,25 @@ def changed_files(workdir: Path | str, since: float, limit: int = LIMIT) -> list
 
     found.sort(key=lambda pair: pair[1], reverse=True)
     return found[:limit]
+
+
+def mentioned_files(text: str, workdir: Path | str, since: float,
+                    limit: int = 5) -> list[Path]:
+    """Файлы, которые нейросеть назвала в ответе и которые правда изменились.
+
+    Почему не верим словам на слово: «сохранила в отчёт.xlsx» она может сказать
+    и не сохранив. Поэтому берём пересечение двух списков — что названо в ответе
+    и что на самом деле стало свежее начала работы. Свежие первыми.
+    """
+    said = (text or "").lower()
+    if not said:
+        return []
+
+    root = Path(workdir)
+    out: list[Path] = []
+    for name, _mtime in changed_files(root, since=since, limit=200):
+        if name.lower() in said or Path(name).name.lower() in said:
+            out.append(root / name)
+        if len(out) >= limit:
+            break
+    return out
