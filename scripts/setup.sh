@@ -43,7 +43,7 @@ done
 if [ "$WITH_VOICE" = "-1" ]; then
   if python3 "$(dirname "$0")/pamyat.py" --tiho 2>/dev/null; then
     WITH_VOICE=1
-    echo "[установка] голос ставлю: памяти на машине хватает ($(python3 "$(dirname "$0")/pamyat.py" 2>/dev/null | sed 's/память машины: //'))"
+    echo "[установка] голос ставлю: $(python3 "$(dirname "$0")/pamyat.py" 2>/dev/null)"
   else
     WITH_VOICE=0
     echo "[установка] голос НЕ ставлю: на этой машине памяти маловато."
