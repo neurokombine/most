@@ -23,7 +23,7 @@ for arg in "$@"; do
   esac
 done
 
-HOME_DIR="${MOST_HOME:-$HOME/.most/$NAME}"
+HOME_DIR="${MOST_HOME:-$HOME/.most/${NAME}}"
 SHARED_DIR="$(dirname "$HOME_DIR")"           # модели общие для всех экземпляров
 MODELS_DIR="$SHARED_DIR/models/faster-whisper"
 VOICES_DIR="$SHARED_DIR/voices"
@@ -102,7 +102,7 @@ if [ "$WITH_VOICE" = "1" ]; then
   .venv/bin/python -m pip install -q -r requirements-voice.txt
 
   mkdir -p "$MODELS_DIR" "$VOICES_DIR"
-  echo "[голос] скачиваю модель распознавания «$WHISPER_MODEL» в $MODELS_DIR…"
+  echo "[голос] скачиваю модель распознавания «${WHISPER_MODEL}» в ${MODELS_DIR}…"
   .venv/bin/python - "$WHISPER_MODEL" "$MODELS_DIR" <<'PYCODE'
 import sys
 from faster_whisper import WhisperModel
@@ -116,13 +116,13 @@ PYCODE
   SPEAKER="${PIPER_VOICE#ru_RU-}"; SPEAKER="${SPEAKER%-*}"
   QUALITY="${PIPER_VOICE##*-}"
   for suffix in ".onnx" ".onnx.json"; do
-    target="$VOICES_DIR/$PIPER_VOICE$suffix"
+    target="$VOICES_DIR/${PIPER_VOICE}$suffix"
     if [ -s "$target" ]; then
-      echo "[голос] $PIPER_VOICE$suffix уже есть — не качаю"
+      echo "[голос] ${PIPER_VOICE}$suffix уже есть — не качаю"
       continue
     fi
-    echo "[голос] скачиваю $PIPER_VOICE$suffix…"
-    curl -fsSL "$BASE_URL/$SPEAKER/$QUALITY/$PIPER_VOICE$suffix" -o "$target" || {
+    echo "[голос] скачиваю ${PIPER_VOICE}$suffix…"
+    curl -fsSL "$BASE_URL/$SPEAKER/$QUALITY/${PIPER_VOICE}$suffix" -o "$target" || {
       echo "[голос] голос $PIPER_VOICE скачать не вышло — мост будет слушать, но отвечать текстом"
       rm -f "$target"
     }
