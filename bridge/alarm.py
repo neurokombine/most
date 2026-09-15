@@ -399,7 +399,7 @@ def money(amount: float) -> str:
     return f"{amount:.2f}".replace(".", ",") + " $"
 
 
-def _short(text: str, limit: int = PROMPT_HEAD) -> str:
+def short(text: str, limit: int = PROMPT_HEAD) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[:limit].rstrip() + "…"
 
@@ -538,7 +538,7 @@ class Scheduler:
         """Что сказать про доделанную работу расписания. Зовёт главный цикл."""
         meta = work.meta or {}
         number = meta.get("schedule_id", "?")
-        head = _short(meta.get("schedule_prompt") or work.prompt)
+        head = short(meta.get("schedule_prompt") or work.prompt)
         result = work.result
 
         if result is None:
@@ -553,11 +553,11 @@ class Scheduler:
         if not result.ok:
             return texts.SCHEDULE_REPORT_FAILED.format(
                 number=number, prompt=head,
-                error=_short(result.error or "работа завершилась неудачно", 300))
+                error=short(result.error or "работа завершилась неудачно", 300))
 
         lines = [texts.SCHEDULE_REPORT_OK.format(
             number=number, prompt=head, how_long=self._how_long_of(work),
-            result=_short(result.text or texts.WORK_EMPTY_ANSWER, RESULT_LIMIT))]
+            result=short(result.text or texts.WORK_EMPTY_ANSWER, RESULT_LIMIT))]
         files = self._files_of(work)
         if files:
             lines.append(texts.SCHEDULE_REPORT_FILES.format(files=", ".join(files)))
@@ -641,7 +641,7 @@ class Scheduler:
                 number=row["schedule_id"],
                 outcome=texts.JOB_OUTCOME.get(row["state"], row["state"]),
                 how_long=how_long(row["duration_sec"]),
-                prompt=_short(row["prompt_head"] or "")))
+                prompt=short(row["prompt_head"] or "")))
         return lines
 
     def _missed_lines(self, since: str) -> list[str]:

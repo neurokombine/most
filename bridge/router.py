@@ -126,16 +126,9 @@ def epoch_of(raw: str) -> float:
         return 0.0
 
 
-def how_long(seconds) -> str:
-    """Сколько длилась работа — словами, а не в секундах с точкой."""
-    try:
-        seconds = int(round(float(seconds)))
-    except (TypeError, ValueError):
-        return "сколько шла — не знаю"
-    if seconds < 60:
-        return f"{seconds} с"
-    minutes, rest = divmod(seconds, 60)
-    return f"{minutes} мин {rest} с" if rest else f"{minutes} мин"
+# «Сколько шла работа» словами — один на весь пакет, чтобы чат и сводка
+# считали одинаково.
+how_long = alarm.how_long
 
 
 class Router:
@@ -453,9 +446,11 @@ class Router:
             shape = texts.SCHEDULE_LINE if row["enabled"] else texts.SCHEDULE_LINE_OFF
             lines.append(shape.format(number=row["id"], when=when,
                                       next=self._when_of(row),
-                                      prompt=(row["prompt"] or "")[:60]))
+                                      prompt=alarm.short(row["prompt"] or "")))
         lines.append("")
-        lines.append(texts.SCHEDULE_FOOTER)
+        # Пример в подсказке — с настоящим номером: «задача 2» при одной задаче
+        # человека только собьёт.
+        lines.append(texts.SCHEDULE_FOOTER.format(number=rows[0]["id"]))
         return "\n".join(lines)
 
     def _schedule_remove(self, number: int) -> str:
