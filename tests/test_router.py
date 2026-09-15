@@ -654,3 +654,42 @@ def test_projects_are_listed_when_asked_in_plain_words(router):
 def test_asking_for_the_summary_is_not_a_request_for_a_file(router):
     text = "\n".join(router.handle(tg("пришли сводку")))
     assert "нет ни одного файла" not in text
+
+
+# --- группы (живая приёмка 15.09) -------------------------------------------
+
+def group(text, user_id=999, chat_id=-1002186710990, channel="telegram"):
+    return Incoming(channel=channel, chat_id=chat_id, user_id=user_id, text=text,
+                    thread_id=0, name="Евгения Косых", group=True, raw={})
+
+
+def test_a_group_gets_silence_and_stays_out_of_the_knocks(router, store):
+    """Бот живёт в чатах учеников; «кто стучался» — не список этих чатов."""
+    assert router.handle(group("Сколько желающих")) == []
+    assert store.recent_strangers() == []
+
+
+def test_a_group_is_noted_apart_from_the_strangers(router, store):
+    router.handle(group("Сколько желающих"))
+    noted = [row for row in store.recent_journal() if row["kind"] == "group"]
+    assert len(noted) == 1
+    assert noted[0]["chat_id"] == -1002186710990
+
+
+def test_the_same_group_is_noted_only_once(router, store):
+    for word in ("раз", "два", "три"):
+        router.handle(group(word))
+    noted = [row for row in store.recent_journal() if row["kind"] == "group"]
+    assert len(noted) == 1
+
+
+def test_even_an_own_person_is_not_answered_in_a_group(router):
+    """Мост в уроке — личный разговор, а не общий чат."""
+    assert router.handle(group("посчитай остатки", user_id=111)) == []
+    assert router.executor.calls == []
+
+
+def test_the_summary_does_not_count_a_group(router, store):
+    router.handle(group("привет всем"))
+    assert store.strangers_since("2000-01-01T00:00:00+00:00") == []
+

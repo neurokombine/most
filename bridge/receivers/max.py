@@ -158,6 +158,7 @@ class MaxReceiver(Receiver):
             text=text,
             thread_id=0,                                      # тем в личке Max нет
             name=_who(sender),
+            group=_is_group(recipient, chat_id),
             raw=update,
             attachments=attachments,
         )
@@ -278,6 +279,21 @@ class MaxReceiver(Receiver):
             self.session.post(BASE + "/messages", params={"chat_id": chat_id},
                               json={"text": part}, headers=self.headers,
                               verify=self.verify, timeout=60)
+
+
+def _is_group(recipient: dict, chat_id) -> bool:
+    """Личка («dialog») или общий чат («chat»).
+
+    Вид Max кладёт рядом с номером чата; если его нет, выдаёт отрицательный
+    номер — так выглядят все групповые чаты (живая приёмка 15.09).
+    """
+    kind = str((recipient or {}).get("chat_type") or "").lower()
+    if kind:
+        return kind != "dialog"
+    try:
+        return int(chat_id) < 0
+    except (TypeError, ValueError):
+        return False
 
 
 def _who(sender: dict) -> str:

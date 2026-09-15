@@ -128,6 +128,7 @@ class TelegramReceiver(Receiver):
             text=text,
             thread_id=int(message.get("message_thread_id") or 0),
             name=_who(sender),
+            group=_is_group(chat),
             raw=update,
             attachments=attachments,
         )
@@ -248,6 +249,24 @@ def _attachments(message: dict) -> list[Attachment]:
                            size=int(body.get("file_size") or 0),
                            duration=int(body.get("duration") or 0), raw=body)]
     return []
+
+GROUP_KINDS = ("group", "supergroup", "channel")
+
+
+def _is_group(chat: dict) -> bool:
+    """Личка это или общий чат. Вид называет сам Telegram, номер — подстраховка.
+
+    Отрицательный номер чата у них всегда означает группу или канал; вид
+    (`type`) точнее, но в редких обновлениях его может не оказаться.
+    """
+    kind = str(chat.get("type") or "").lower()
+    if kind:
+        return kind in GROUP_KINDS
+    try:
+        return int(chat.get("id") or 0) < 0
+    except (TypeError, ValueError):
+        return False
+
 
 def _who(sender: dict) -> str:
     """Имя отправителя: имя с фамилией, а нет их — «собачка» с прозвищем."""

@@ -366,6 +366,22 @@ class Store:
         self.note("stranger", channel=channel, chat_id=chat_id, user_id=user_id,
                   text=head, name=(name or "").strip()[:KNOCK_NAME_LIMIT] or None)
 
+    def note_group(self, channel: str, chat_id: int, name: str = "") -> None:
+        """Общий чат: слышали, но не отвечаем. Пишем один раз на чат.
+
+        Отдельным видом, а не «чужим»: бот школы состоит в чатах учеников, и
+        «кто стучался» не должен превращаться в список этих чатов. Одна строка
+        на чат — чтобы болтливая группа не забила журнал за вечер.
+        """
+        seen = self.db.execute(
+            "SELECT 1 FROM journal WHERE kind='group' AND channel=? AND chat_id=? LIMIT 1",
+            (channel, chat_id)).fetchone()
+        if seen:
+            return
+        self.note("group", channel=channel, chat_id=chat_id,
+                  name=(name or "").strip()[:KNOCK_NAME_LIMIT] or None,
+                  text="слышу этот общий чат, но отвечаю только в личке")
+
     def last_knocks(self) -> dict:
         """Последний постучавшийся в каждом канале: «пусти меня» — это про него."""
         rows = self.db.execute(

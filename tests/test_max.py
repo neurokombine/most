@@ -386,3 +386,25 @@ def test_unknown_extension_still_gets_a_kind(store, tmp_path):
     r.send_file(900, path)
 
     assert session.calls[1]["files"]["data"][2] == "application/octet-stream"
+
+
+# --- группы (живая приёмка 15.09) -------------------------------------------
+
+def test_a_message_from_a_max_group_is_marked_as_such(store):
+    """Муся состоит в чатах учеников, и мост слышит там каждое слово."""
+    raw = nested_update(text="3 модуль откроется 21 сентября")
+    raw["message"]["recipient"] = {"chat_id": -77188873429053, "chat_type": "chat"}
+    r = make(store, [FakeResponse(200, {"updates": [raw]})])
+    assert r.poll_once()[0].group is True
+
+
+def test_a_max_dialog_is_not_a_group(store):
+    r = make(store, [FakeResponse(200, {"updates": [nested_update()]})])
+    assert r.poll_once()[0].group is False
+
+
+def test_a_negative_max_chat_is_a_group_even_without_the_kind(store):
+    raw = nested_update()
+    raw["message"]["recipient"] = {"chat_id": -77188873429053, "user_id": 19520030}
+    r = make(store, [FakeResponse(200, {"updates": [raw]})])
+    assert r.poll_once()[0].group is True

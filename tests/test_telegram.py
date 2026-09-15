@@ -360,3 +360,30 @@ def test_the_name_of_the_sender_comes_along(store):
                                      "text": "привет"}}]})])
     got = TelegramReceiver(token="t", store=store, session=session).poll_once()
     assert got[0].name == "Наталья Зубченко"
+
+
+# --- группы (живая приёмка 15.09) -------------------------------------------
+
+def group_update(update_id=1, text="Сколько желающих", chat_type="supergroup"):
+    raw = update(update_id, text=text, chat_id=-1002186710990)
+    raw["message"]["chat"]["type"] = chat_type
+    return raw
+
+
+def test_a_message_from_a_group_is_marked_as_such(store):
+    """Муся живёт в чатах учеников, и мост слышит там каждое слово."""
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [group_update()]})])
+    assert r.poll_once()[0].group is True
+
+
+def test_a_private_message_is_not_a_group(store):
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [update(1)]})])
+    assert r.poll_once()[0].group is False
+
+
+def test_a_negative_chat_is_a_group_even_without_the_kind(store):
+    """Вид чата мессенджер называет не всегда — отрицательный номер называет сам."""
+    raw = group_update()
+    raw["message"]["chat"].pop("type")
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [raw]})])
+    assert r.poll_once()[0].group is True
