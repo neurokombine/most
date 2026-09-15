@@ -257,3 +257,56 @@ def test_the_full_checkup_looks_at_the_machine_too(config):
     assert "памят" in said
     assert "мест" in said or "диск" in said
     assert "мск" in said
+
+
+class FakeRun:
+    """Подставной `subprocess.run`: отвечает по первому доводу команды."""
+
+    def __init__(self, version=(0, "2.1.267 (Claude Code)"), auth=(0, '{"loggedIn": true}')):
+        self.version, self.auth = version, auth
+        self.calls = []
+
+    def __call__(self, cmd, **kwargs):
+        self.calls.append(list(cmd))
+        code, out = self.auth if "auth" in cmd else self.version
+
+        class Done:
+            returncode, stdout, stderr = code, out, ""
+        return Done()
+
+
+def test_claude_check_notices_that_the_login_has_expired(tmp_path):
+    """`claude --version` отвечает и без входа — а работа при этом не пойдёт."""
+    binary = tmp_path / "claude"
+    binary.write_text("", encoding="utf-8")
+    runner = FakeRun(auth=(0, '{"loggedIn": false, "authMethod": "none"}'))
+    check = check_claude(str(binary), runner=runner)
+    assert check.ok is False
+    assert "вход" in check.what.lower()
+    assert "login" in (check.hint or "")
+
+
+def test_claude_check_is_green_when_the_login_is_alive(tmp_path):
+    binary = tmp_path / "claude"
+    binary.write_text("", encoding="utf-8")
+    check = check_claude(str(binary), runner=FakeRun())
+    assert check.ok is True
+    assert "2.1.267" in check.what
+
+
+def test_claude_check_does_not_scare_when_it_cannot_ask_about_the_login(tmp_path):
+    """Старая версия без такой команды — не повод пугать человека."""
+    binary = tmp_path / "claude"
+    binary.write_text("", encoding="utf-8")
+    check = check_claude(str(binary), runner=FakeRun(auth=(1, "unknown command")))
+    assert check.ok is True
+
+
+def test_the_free_question_about_the_login_does_not_wake_the_model(tmp_path):
+    """Спрашиваем сохранённый вход, а не модель: подписка на это не тратится."""
+    binary = tmp_path / "claude"
+    binary.write_text("", encoding="utf-8")
+    runner = FakeRun()
+    check_claude(str(binary), runner=runner)
+    assert ["auth", "status"] == runner.calls[-1][-2:]
+    assert all("-p" not in call for call in runner.calls)

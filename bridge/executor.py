@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import alarm, narrator
+from . import alarm, narrator, texts
 from .receivers.base import mask
 
 DEFAULT_TIMEOUT = 900        # бюджет времени на одну работу: 15 минут
@@ -36,6 +36,9 @@ DEFAULT_MODEL = "sonnet"     # по умолчанию не Opus: headless тя�
 # Признак того, что сессия не нашлась: id протух, папку ~/.claude вычистили,
 # работали на другой машине. Ловится и по тексту в потоке, и по stderr.
 SESSION_LOST_MARK = "No conversation found"
+# Вход по подписке протух: `claude -p` печатает это в обычный вывод (не в ошибки),
+# выходит кодом 1 — и человек без этой ловушки увидел бы «код 1» вместо причины.
+NO_LOGIN_MARK = "Not logged in"
 FAKE_WAIT_CAP = 1.0          # дольше секунды подставной исполнитель не тянет
 
 # Что оставляем вложенному процессу. Всё прочее (включая CLAUDECODE*,
@@ -319,6 +322,7 @@ class ClaudeExecutor(Executor):
         partial = narrator.partial_text(events)
         session_lost = bool(resume) and not ok and (
             SESSION_LOST_MARK in err_tail or SESSION_LOST_MARK in raw)
+        no_login = not ok and (NO_LOGIN_MARK in err_tail or NO_LOGIN_MARK in raw)
 
         error = ""
         if stopped:
@@ -327,6 +331,8 @@ class ClaudeExecutor(Executor):
             error = f"работа шла дольше {self.timeout} с и была остановлена"
         elif session_lost:
             error = "прошлый разговор не нашёлся"
+        elif no_login:
+            error = texts.NO_LOGIN_WORK
         elif not ok:
             error = err_tail or f"claude завершился с кодом {exit_code}"
 

@@ -278,3 +278,23 @@ def test_partial_messages_are_asked_for_so_that_stop_has_something_to_show(tmp_p
     ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs", claude_bin=stub(tmp_path, ARGS_STUB))
     result = ex.run("раз", work)
     assert "--include-partial-messages" in result.text
+
+
+NO_LOGIN_STUB = '''
+import sys
+# Ровно то, что печатает настоящий claude, когда вход по подписке протух:
+# обычный вывод, не ошибки, и код 1.
+print("Not logged in \\u00b7 Please run /login")
+sys.exit(1)
+'''
+
+
+def test_expired_login_is_named_by_words_not_by_exit_code(tmp_path):
+    """Вход на сервере протухает молча — человек в чате обязан узнать причину."""
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs", claude_bin=stub(tmp_path, NO_LOGIN_STUB))
+    result = ex.run("посчитай остатки", work, session_id=None)
+    assert result.ok is False
+    assert "вход в аккаунт" in result.error.lower()
+    assert "код 1" not in result.error

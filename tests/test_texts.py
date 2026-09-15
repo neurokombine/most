@@ -28,6 +28,7 @@ ALLOWED_LATIN = {
     "folder", "project", "result", "error", "count", "times", "who", "spent",
     "cost", "known", "head", "found", "partial", "problem", "used", "day",
     "time", "number", "off", "where", "all", "bad", "strangers", "allowed",
+    "auth", "login",
     "parallel", "e", "g", "md", "tzdata", "token", "live",
 }
 

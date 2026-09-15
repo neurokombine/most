@@ -15,6 +15,7 @@
 """
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -82,21 +83,52 @@ def check_projects(config) -> Check:
     return Check(True, f"папок проектов: {len(folders)} (первая — «{folders[0]}»)")
 
 
-def check_claude(claude_bin: str | None = None) -> Check:
+def check_claude(claude_bin: str | None = None, runner=None) -> Check:
     claude_bin = claude_bin or resolve_claude_bin()
+    runner = runner or subprocess.run
     if not Path(claude_bin).exists() and not shutil.which(str(claude_bin)):
         return Check(False, f"нейросеть claude не найдена: {claude_bin}",
                      "поставьте Claude Code и войдите в аккаунт по подписке")
     try:
-        done = subprocess.run([str(claude_bin), "--version"], capture_output=True,
-                              text=True, timeout=30, env=clean_env())
+        done = runner([str(claude_bin), "--version"], capture_output=True,
+                      text=True, timeout=30, env=clean_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return Check(False, f"claude не запускается: {exc}",
                      "проверьте установку Claude Code")
     if done.returncode != 0:
         return Check(False, "claude отвечает ошибкой на --version",
                      (done.stderr or done.stdout or "").strip()[:200] or "проверьте установку")
-    return Check(True, f"нейросеть на месте: {(done.stdout or '').strip()}")
+    version = (done.stdout or "").strip()
+    if signed_in(claude_bin, runner) is False:
+        return Check(False, texts.NO_LOGIN_DOCTOR, texts.NO_LOGIN_HINT)
+    return Check(True, f"нейросеть на месте: {version}")
+
+
+def signed_in(claude_bin, runner) -> bool | None:
+    """Выполнен ли вход по подписке. Спрашивается у самой нейросети, но даром.
+
+    `claude auth status` смотрит сохранённый вход на диске: ни запроса к модели,
+    ни траты подписки, ответ за секунду. Это важно: вход на сервере протухает
+    молча, `claude --version` при этом отвечает как ни в чём не бывало, и мост
+    «стоит», а каждая работа падает. Живой вопрос (`--live`) ловит то же самое,
+    но тратит подписку — поэтому сам собой он не делается никогда, а этот делается.
+
+    Ответ `None` значит «не смогла спросить» (старая версия, нет такой команды):
+    тогда не пугаем человека и считаем, что вход на месте.
+    """
+    try:
+        done = runner([str(claude_bin), "auth", "status"], capture_output=True,
+                      text=True, timeout=30, env=clean_env())
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0:
+        return None
+    try:
+        said = json.loads((done.stdout or "").strip() or "{}")
+    except ValueError:
+        return None
+    value = said.get("loggedIn")
+    return bool(value) if isinstance(value, bool) else None
 
 
 def check_voice(config, library=None) -> Check:
