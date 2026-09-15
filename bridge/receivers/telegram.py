@@ -6,20 +6,40 @@
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 import requests
 
 from ..narrator import TELEGRAM_LIMIT, chunk
-from .base import BridgeConflict, Incoming, RateLimited, Receiver, TokenRejected, mask
+from .base import (Attachment, BridgeConflict, FileTooBig, Incoming, RateLimited,
+                   Receiver, TokenRejected, mask)
 
 API = "https://api.telegram.org/bot{token}/{method}"
+FILE_API = "https://api.telegram.org/file/bot{token}/{path}"
 LONG_POLL_TIMEOUT = 25
 OFFSET_KEY = "telegram_offset"
 ALLOWED_UPDATES = ["message"]
+
+# Пределы Bot API, не наши: скачать бот может файл до 20 МБ, отправить — до 50.
+# Больше — не «попробуйте снова», а другой путь; так и говорим человеку.
+DOWNLOAD_LIMIT = 20 * 1024 * 1024
+UPLOAD_LIMIT = 50 * 1024 * 1024
+FILE_TIMEOUT = 180
+
+# Поля сообщения с файлом → наш общий вид. Порядок важен: у сообщения бывает
+# и документ, и подпись, но два файла в одном сообщении Telegram не пришлёт.
+# Голосовые сюда нарочно не входят: их распознаёт этап 4, и до него
+# голосовое остаётся неуслышанным, а не ложится файлом в папку.
+FILE_FIELDS = (("document", "file"), ("photo", "photo"), ("video", "video"),
+               ("audio", "audio"))
+TOO_BIG_MARKS = ("file is too big", "file_id_invalid_too_big")
 
 
 class TelegramReceiver(Receiver):
     channel = "telegram"
     limit = TELEGRAM_LIMIT
+    download_limit = DOWNLOAD_LIMIT
+    upload_limit = UPLOAD_LIMIT
 
     def __init__(self, token: str, store, session=None, long_poll_timeout: int = LONG_POLL_TIMEOUT):
         self.token = token
@@ -92,9 +112,11 @@ class TelegramReceiver(Receiver):
 
     def _to_incoming(self, update: dict) -> Incoming | None:
         message = update.get("message") or {}
-        text = (message.get("text") or "").strip()
-        if not text:
-            return None                                       # голос и файлы — следующие этапы
+        attachments = _attachments(message)
+        # Подпись к файлу — это задание про него: «посчитай итог по этой таблице».
+        text = (message.get("text") or message.get("caption") or "").strip()
+        if not text and not attachments:
+            return None                                       # голосовые — этап 4
         chat = message.get("chat") or {}
         sender = message.get("from") or {}
         return Incoming(
@@ -104,6 +126,7 @@ class TelegramReceiver(Receiver):
             text=text,
             thread_id=int(message.get("message_thread_id") or 0),
             raw=update,
+            attachments=attachments,
         )
 
     # --- ответ --------------------------------------------------------------
@@ -115,6 +138,82 @@ class TelegramReceiver(Receiver):
                                     "disable_web_page_preview": True},
                               timeout=30)
 
+    # --- файлы --------------------------------------------------------------
+
+    def fetch(self, attachment: Attachment) -> bytes:
+        """Скачивает присланный файл: getFile → ссылка → тело.
+
+        Размер проверяем до запроса, если Telegram его назвал: незачем ходить
+        за файлом, который всё равно не дадут.
+        """
+        if attachment.size and attachment.size > self.download_limit:
+            raise FileTooBig("Telegram не отдаёт файлы больше 20 МБ",
+                             size=attachment.size, limit=self.download_limit)
+
+        resp = self.session.get(self._url("getFile"),
+                                params={"file_id": attachment.file_id}, timeout=60)
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            data = {}
+        if not data.get("ok"):
+            description = self._mask(data.get("description") or f"код {resp.status_code}")
+            if any(mark in description.lower() for mark in TOO_BIG_MARKS):
+                raise FileTooBig("Telegram не отдаёт файлы больше 20 МБ",
+                                 size=attachment.size, limit=self.download_limit)
+            raise RuntimeError(f"не смог забрать файл: {description}")
+
+        result = data.get("result") or {}
+        size = int(result.get("file_size") or attachment.size or 0)
+        if size > self.download_limit:
+            raise FileTooBig("Telegram не отдаёт файлы больше 20 МБ",
+                             size=size, limit=self.download_limit)
+
+        body = self.session.get(
+            FILE_API.format(token=self.token, path=result.get("file_path") or ""),
+            timeout=FILE_TIMEOUT)
+        if getattr(body, "status_code", 200) >= 400:
+            raise RuntimeError(f"не смог забрать файл: код {body.status_code}")
+        return body.content
+
+    def send_file(self, chat_id: int, path, caption: str = "") -> None:
+        """Отправляет файл документом — и снимок тоже: иначе Telegram его пережмёт."""
+        path = Path(path)
+        size = path.stat().st_size
+        if size > self.upload_limit:
+            raise FileTooBig("Telegram не пропускает файлы больше 50 МБ",
+                             size=size, limit=self.upload_limit)
+
+        data = {"chat_id": chat_id}
+        if caption:
+            data["caption"] = caption[:1024]
+        with open(path, "rb") as body:
+            resp = self.session.post(self._url("sendDocument"), data=data,
+                                     files={"document": (path.name, body)},
+                                     timeout=FILE_TIMEOUT)
+        try:
+            answer = resp.json() or {}
+        except ValueError:
+            answer = {}
+        if not answer.get("ok", resp.status_code < 400):
+            raise RuntimeError("не смог отправить файл: "
+                               + self._mask(answer.get("description")
+                                            or f"код {resp.status_code}"))
+
+
+def _attachments(message: dict) -> list[Attachment]:
+    """Файл из сообщения в общем виде. Двух файлов в одном сообщении не бывает."""
+    for field, kind in FILE_FIELDS:
+        body = message.get(field)
+        if not body:
+            continue
+        if field == "photo":
+            # Снимок приходит лесенкой размеров; берём самый крупный.
+            body = sorted(body, key=lambda item: item.get("file_size") or 0)[-1]
+        return [Attachment(kind=kind, file_id=str(body.get("file_id") or ""),
+                           file_name=str(body.get("file_name") or ""),
+                           size=int(body.get("file_size") or 0), raw=body)]
+    return []
 
 def _retry_after(resp) -> int | None:
     value = (resp.headers or {}).get("Retry-After")

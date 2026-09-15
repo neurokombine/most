@@ -1,7 +1,8 @@
 """Приёмник Telegram: long polling, персистентный offset, три класса ошибок."""
 import pytest
 
-from bridge.receivers.base import BridgeConflict, TokenRejected, RateLimited
+from bridge.receivers.base import (Attachment, BridgeConflict, FileTooBig,
+                                   RateLimited, TokenRejected)
 from bridge.receivers.telegram import TelegramReceiver
 from tests.fakes import FakeResponse, FakeSession
 
@@ -112,3 +113,150 @@ def test_404_means_token_rejected_not_a_pause(store):
     r = make(store, [FakeResponse(404, {"ok": False, "description": "Not Found"})])
     with pytest.raises(TokenRejected):
         r.poll_once()
+
+
+# --- этап 3: файлы туда и обратно -------------------------------------------
+
+def with_document(update_id=20, name="отчёт за сентябрь.xlsx", size=1024, caption=None):
+    message = {
+        "message_id": update_id,
+        "from": {"id": 111},
+        "chat": {"id": 500, "type": "private"},
+        "document": {"file_id": "BQACAgIA-file", "file_unique_id": "u1",
+                     "file_name": name, "mime_type": "application/vnd.ms-excel",
+                     "file_size": size},
+    }
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
+def with_photo(update_id=21, caption=None):
+    message = {
+        "message_id": update_id,
+        "from": {"id": 111},
+        "chat": {"id": 500, "type": "private"},
+        "photo": [{"file_id": "small", "file_unique_id": "s", "width": 90,
+                   "height": 60, "file_size": 900},
+                  {"file_id": "big", "file_unique_id": "b", "width": 1280,
+                   "height": 720, "file_size": 90000}],
+    }
+    if caption is not None:
+        message["caption"] = caption
+    return {"update_id": update_id, "message": message}
+
+
+def test_document_becomes_an_attachment(store):
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [with_document()]})])
+    msg = r.poll_once()[0]
+    assert len(msg.attachments) == 1
+    att = msg.attachments[0]
+    assert att.kind == "file"
+    assert att.file_name == "отчёт за сентябрь.xlsx"
+    assert att.size == 1024
+    assert att.file_id == "BQACAgIA-file"
+    assert msg.text == ""
+
+
+def test_caption_becomes_the_task(store):
+    r = make(store, [FakeResponse(200, {"ok": True, "result":
+                                        [with_document(caption="посчитай итог по этой таблице")]})])
+    msg = r.poll_once()[0]
+    assert msg.text == "посчитай итог по этой таблице"
+    assert msg.attachments
+
+
+def test_photo_takes_the_biggest_size(store):
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [with_photo()]})])
+    att = r.poll_once()[0].attachments[0]
+    assert att.file_id == "big"
+    assert att.kind == "photo"
+    assert att.file_name == ""
+
+
+def test_video_and_audio_are_attachments_too(store):
+    updates = []
+    for number, (kind, body) in enumerate((
+            ("video", {"file_id": "v", "file_unique_id": "v", "file_size": 10,
+                       "file_name": "ролик.mp4"}),
+            ("audio", {"file_id": "a", "file_unique_id": "a", "file_size": 10,
+                       "file_name": "звук.mp3"}))):
+        updates.append({"update_id": 30 + number, "message": {
+            "message_id": 30 + number, "from": {"id": 111},
+            "chat": {"id": 500, "type": "private"}, kind: body}})
+    r = make(store, [FakeResponse(200, {"ok": True, "result": updates})])
+    kinds = [m.attachments[0].kind for m in r.poll_once()]
+    assert kinds == ["video", "audio"]
+
+
+def test_file_is_downloaded_through_get_file(store):
+    session = FakeSession([
+        FakeResponse(200, {"ok": True, "result": {"file_id": "BQACAgIA-file",
+                                                  "file_path": "documents/file_7.xlsx",
+                                                  "file_size": 1024}}),
+        FakeResponse(200, content=b"body-of-the-file"),
+    ])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    data = r.fetch(Attachment(kind="file", file_id="BQACAgIA-file", size=1024))
+    assert data == b"body-of-the-file"
+    assert "getFile" in session.calls[0]["url"]
+    assert session.calls[1]["url"].endswith("/file/bot123:abc/documents/file_7.xlsx")
+
+
+def test_file_over_twenty_megabytes_is_refused_before_the_request(store):
+    session = FakeSession([])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    with pytest.raises(FileTooBig):
+        r.fetch(Attachment(kind="file", file_id="x", size=25 * 1024 * 1024))
+    assert session.calls == []          # в телеграм даже не ходили
+
+
+def test_telegram_saying_file_is_too_big_is_the_same_trouble(store):
+    session = FakeSession([FakeResponse(400, {"ok": False, "description": "file is too big"})])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    with pytest.raises(FileTooBig):
+        r.fetch(Attachment(kind="file", file_id="x", size=0))
+
+
+def test_download_trouble_never_shows_the_token(store):
+    session = FakeSession([FakeResponse(400, {"ok": False,
+                                              "description": "Bad Request: 123:abc is wrong"})])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    with pytest.raises(RuntimeError) as exc:
+        r.fetch(Attachment(kind="file", file_id="x", size=0))
+    assert "123:abc" not in str(exc.value)
+
+
+def test_file_goes_out_as_a_document(store, tmp_path):
+    path = tmp_path / "отчёт за сентябрь.xlsx"
+    path.write_bytes("таблица".encode("utf-8"))
+    session = FakeSession([FakeResponse(200, {"ok": True, "result": {"message_id": 5}})])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    r.send_file(500, path, caption="вот он")
+
+    call = session.calls[0]
+    assert "sendDocument" in call["url"]
+    assert call["data"]["chat_id"] == 500
+    assert call["data"]["caption"] == "вот он"
+    assert "document" in call["files"]
+    assert call["files"]["document"][0] == "отчёт за сентябрь.xlsx"
+
+
+def test_photo_is_sent_as_a_document_not_as_a_photo(store, tmp_path):
+    path = tmp_path / "кадр.jpg"
+    path.write_bytes(b"jpeg")
+    session = FakeSession([FakeResponse(200, {"ok": True, "result": {"message_id": 5}})])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    r.send_file(500, path)
+    assert "sendDocument" in session.calls[0]["url"]     # без пережатия
+
+
+def test_sending_a_file_over_fifty_megabytes_is_refused(store, tmp_path):
+    path = tmp_path / "большой.bin"
+    path.write_bytes(b"0")
+    session = FakeSession([])
+    r = TelegramReceiver(token="123:abc", store=store, session=session)
+    r.upload_limit = 0
+    with pytest.raises(FileTooBig):
+        r.send_file(500, path)
+    assert session.calls == []

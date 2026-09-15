@@ -3,11 +3,12 @@ import json as _json
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, text=None, headers=None):
+    def __init__(self, status_code=200, payload=None, text=None, headers=None, content=None):
         self.status_code = status_code
         self._payload = payload
         self.text = text if text is not None else _json.dumps(payload or {}, ensure_ascii=False)
         self.headers = headers or {}
+        self.content = content if content is not None else self.text.encode("utf-8")
 
     @property
     def ok(self):
