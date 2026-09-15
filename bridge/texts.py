@@ -618,6 +618,10 @@ CLI_STATUS_HEARD_HEADER = "Мессенджеры:"
 
 CLI_STATUS_PEOPLE = "Своих: {allowed}. Чужих стуков за сутки: {strangers}."
 
+CLI_STATUS_TROUBLES_HEADER = "Последнее, на чём мост спотыкался:"
+
+CLI_STATUS_TROUBLE_LINE = "• {at} · {channel} · {text}"
+
 CLI_STATUS_JOBS_HEADER = "Последние работы:"
 
 CLI_STATUS_JOB_LINE = "• {at} · {outcome} · {how_long} · «{prompt}»"

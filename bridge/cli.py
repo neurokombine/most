@@ -30,6 +30,7 @@ from .store import Store
 COMMANDS = ("knock", "allow", "deny", "who", "status", "doctor", "say")
 KNOCKS_SHOWN = 20
 JOBS_SHOWN = 5
+TROUBLES_SHOWN = 3
 DAY = 24 * 3600
 
 
@@ -232,6 +233,17 @@ def status(config, store) -> Answer:
     allowed = len(store.list_allowed())
     lines += ["", texts.CLI_STATUS_PEOPLE.format(allowed=allowed, strangers=strangers)]
 
+    # Последние беды: канал мог погаснуть час назад, и тогда молчание бота
+    # объясняется не «мост не запущен», а вот этой строкой.
+    troubles = [row for row in store.journal_since("stopped", since)][-TROUBLES_SHOWN:]
+    if troubles:
+        lines += ["", texts.CLI_STATUS_TROUBLES_HEADER]
+        for row in troubles:
+            lines.append(texts.CLI_STATUS_TROUBLE_LINE.format(
+                at=at_text(row["at"]),
+                channel=channel_name(row["channel"]) if row["channel"] else "мост",
+                text=(row["text"] or "").strip()))
+
     jobs = store.list_jobs(limit=JOBS_SHOWN)
     lines += ["", texts.CLI_STATUS_JOBS_HEADER]
     if not jobs:
@@ -255,6 +267,8 @@ def status(config, store) -> Answer:
             off="" if row["enabled"] else " · выключена"))
 
     data = {"running": running, "pid": pid, "heard": heard, "allowed": allowed,
+            "troubles": [{"at": r["at"], "channel": r["channel"], "text": r["text"]}
+                         for r in troubles],
             "strangers_24h": strangers, "twins": [p for p, _ in twins],
             "jobs": [{"at": r["started_at"], "state": r["state"],
                       "prompt": (r["prompt_head"] or "")[:60]} for r in jobs],

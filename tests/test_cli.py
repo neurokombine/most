@@ -246,3 +246,12 @@ def test_an_unknown_command_is_answered_with_the_list_of_known_ones(settings, st
     code, text = run("сделай-хорошо", config=settings, store=store, capsys=capsys)
     assert code == 1
     assert "knock" in text and "status" in text
+
+
+def test_status_shows_the_last_troubles_so_the_silence_has_a_reason(settings, store, capsys):
+    """Канал погас — об этом написано в журнале, и `status` обязан это показать."""
+    store.note("stopped", channel="telegram",
+               text="Этого бота уже слушает кто-то ещё: второй мост")
+    code, text = run("status", config=settings, store=store, capsys=capsys)
+    assert "слушает кто-то ещё" in text
+    assert "телеграм" in text

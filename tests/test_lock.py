@@ -56,3 +56,19 @@ def test_the_second_bridge_of_the_same_name_is_found_among_the_processes():
     assert lock.other_bridges("anna", mine=999, lines=lines) == [(501, lines[0].strip())]
     assert lock.other_bridges("anna", mine=501, lines=lines) == []
     assert lock.other_bridges("boris", mine=1, lines=lines) == [(777, lines[1].strip())]
+
+
+def test_the_shell_that_started_us_is_not_taken_for_a_second_bridge():
+    """Строка запуска видна и у оболочки, из которой мост позвали, — это не мост."""
+    lines = [
+        "  100 /bin/zsh -c cd /home/u/most && python3 -m bridge --name anna",
+        "  101 /usr/bin/python3 -m bridge --name anna",
+    ]
+    assert lock.other_bridges("anna", mine=999, lines=lines) == [(101, lines[1].strip())]
+
+
+def test_a_command_is_not_a_second_bridge():
+    """`... --name anna status` — это вопрос к базе, а не второй слушатель."""
+    lines = ["  202 /usr/bin/python3 -m bridge --name anna status",
+             "  203 /usr/bin/python3 -m bridge --name anna allow last"]
+    assert lock.other_bridges("anna", mine=999, lines=lines) == []

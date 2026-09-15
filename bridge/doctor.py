@@ -66,8 +66,8 @@ def check_config(config) -> Check:
     if config.permissions_are_loose():
         return Check(False, f"файл с токеном открыт другим пользователям машины: {path}",
                      f"chmod 600 {path}")
-    channels = ", ".join(config.enabled_channels())
-    return Check(True, f"настройки читаются, каналы: {channels}, права закрыты")
+    channels = ", ".join(name_of(c) for c in config.enabled_channels())
+    return Check(True, f"настройки читаются, мессенджеры: {channels}, права закрыты")
 
 
 def check_projects(config) -> Check:
@@ -127,10 +127,16 @@ def check_voice(config, library=None) -> Check:
     return Check(True, f"голос слышит моделью «{settings.model}», {out}")
 
 
+def name_of(channel: str) -> str:
+    """Мессенджер называем так, как его называет человек: «телеграм», а не «telegram»."""
+    return texts.CHANNEL_NAMES.get(channel, channel)
+
+
 def check_network(channel: str, session=None, token: str = "") -> Check:
     """Живая ли дорога до мессенджера. Токен в текст не попадает никогда."""
+    who = name_of(channel)
     if not (token or "").strip():
-        return Check(False, f"токен {channel} не вписан в настройки",
+        return Check(False, f"токен {who} не вписан в настройки",
                      "возьмите токен у @BotFather (Telegram) или у @MasterBot (Max) "
                      "и впишите его в config.yaml")
     session = session or requests.Session()
@@ -142,18 +148,18 @@ def check_network(channel: str, session=None, token: str = "") -> Check:
     try:
         resp = session.get(url, **kwargs)
     except requests.exceptions.RequestException as exc:
-        return Check(False, f"нет сети до {channel}: {mask(exc, [token])}",
+        return Check(False, f"нет сети до {who}: {mask(exc, [token])}",
                      "проверьте интернет на сервере и настройки DNS")
     if resp.status_code in (401, 403):
-        return Check(False, f"{channel} не признал токен",
+        return Check(False, f"{who} не принял токен",
                      texts.TELEGRAM_TOKEN_REJECTED if channel == "telegram"
                      else texts.MAX_TOKEN_REJECTED)
     if resp.status_code == 409:
-        return Check(False, f"{channel}: слушателя перехватили", texts.TELEGRAM_CONFLICT)
+        return Check(False, f"{who}: этого бота слушает кто-то ещё", texts.TELEGRAM_CONFLICT)
     if not (200 <= resp.status_code < 300):
-        return Check(False, f"{channel} отвечает кодом {resp.status_code}",
+        return Check(False, f"{who} отвечает не так, как обычно",
                      "похоже, беда на их стороне — подождите и проверьте снова")
-    return Check(True, f"сеть до {channel} есть, бот отзывается")
+    return Check(True, f"сеть до {who} есть, бот отзывается")
 
 
 # --- машина: замок, соседи, часы, память, диск ------------------------------
@@ -163,7 +169,8 @@ def check_lock(config) -> Check:
     pid = lock.InstanceLock(Path(config.home) / "most.lock").holder_pid()
     if pid:
         return Check(True, f"мост запущен, процесс {pid}")
-    return Check(True, "мост не запущен — если бот молчит, причина может быть в этом",
+    return Check(True, "мост сейчас не запущен — это не поломка, но если бот молчит, "
+                       "причина может быть в этом",
                  f"запустите: systemctl --user start most@{config.name} "
                  f"(или вручную: python -m bridge --name {config.name})")
 

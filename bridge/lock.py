@@ -18,6 +18,9 @@ from pathlib import Path
 
 CLAUDE_MARK = "claude"
 PS_TIMEOUT = 10
+# Команды моста (`status`, `allow` …) — это вопросы к базе, а не слушатели бота:
+# в списке процессов они выглядят почти так же, но вторым мостом не являются.
+BRIDGE_COMMANDS = ("knock", "allow", "deny", "who", "status", "doctor", "say")
 
 
 class InstanceLock:
@@ -169,6 +172,16 @@ def other_bridges(name: str, mine: int | None = None, lines=None) -> list[tuple[
         except (TypeError, ValueError):
             continue
         if pid == mine:
+            continue
+        parts = rest.split()
+        if not parts:
+            continue
+        # Запускает мост python, а не оболочка: строка запуска видна и у того
+        # `sh -c`, из которого мост позвали, — и он мостом не является.
+        if not Path(parts[0]).name.startswith("python"):
+            continue
+        # Команда моста — не слушатель: она спрашивает базу и выходит.
+        if any(part in BRIDGE_COMMANDS for part in parts[1:]):
             continue
         if f"--name {name}" not in rest and not (name == "default" and "--name" not in rest):
             continue
