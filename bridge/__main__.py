@@ -10,7 +10,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from . import texts
+from . import lock, texts
 from .config import ConfigError, load_config
 from .daemon import Bridge
 from .executor import ClaudeExecutor
@@ -57,6 +57,14 @@ def main(argv: list[str] | None = None) -> int:
         print("мост: " + texts.CONFIG_LOOSE_PERMISSIONS.format(path=config.config_path),
               flush=True)
 
+    # Один мост на экземпляр. Второй отобрал бы у первого обновления — и бот
+    # замолчал бы для обоих. Выходим кодом 0: респавн юнита тут не поможет.
+    held = lock.InstanceLock(config.home / "most.lock")
+    if not held.acquire():
+        print("мост: " + texts.ALREADY_RUNNING.format(
+            name=config.name, pid=held.holder_pid() or "неизвестен"), flush=True)
+        return 0
+
     bridge = build_bridge(config)
     channels = ", ".join(config.enabled_channels()) or "нет"
     print(f"мост «{config.name}»: слушаю {channels}; папка проектов {config.projects_dir}; "
@@ -73,6 +81,7 @@ def main(argv: list[str] | None = None) -> int:
         bridge.pool.stop_all()
         bridge.pool.wait_idle(timeout=30)
         bridge.store.close()
+        held.release()
 
 
 if __name__ == "__main__":

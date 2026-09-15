@@ -22,15 +22,18 @@ from pathlib import Path
 
 import requests
 
-from . import narrator, texts
+from . import lock, narrator, texts
 from .receivers.base import (BridgeConflict, FileTooBig, RateLimited,
                              TokenRejected, mask)
 from .router import Router
+from .store import now_iso
 from .works import WorkPool
 
 EXIT_OK = 0
 EXIT_STALE = 3          # «мой код устарел» — юнит поднимет новую версию
 NETWORK_PAUSE = 5
+HEARD_EVERY = 60        # как часто отмечать в базе, что мессенджер отозвался
+HEARD_KEY = "heard:{channel}"
 DEFAULT_PAUSE = 10
 IDLE_PAUSE = 1          # чтобы быстрые пустые ответы не крутили цикл вхолостую
 
@@ -58,6 +61,7 @@ class Bridge:
         self.alarm = self.router.alarm
         self.alarm.postbox = self
         self._fingerprint = _code_fingerprint()
+        self._heard_at: dict[str, float] = {}
 
     # --- состояние ----------------------------------------------------------
 
@@ -105,6 +109,7 @@ class Bridge:
                 self.sleep(NETWORK_PAUSE)
                 continue
 
+            self._heard(channel)
             for message in incoming:
                 handled += 1
                 self._answer(receiver, message)
@@ -114,6 +119,22 @@ class Bridge:
         handled += self._look_at_the_clock()
         handled += self.deliver()
         return handled
+
+    def _heard(self, channel: str) -> None:
+        """Отмечаем, что мессенджер отозвался: по этой отметке `status` отвечает
+        на «бот молчит» — мост жив, но слышал ли он телеграм последние сутки.
+
+        Пишем не чаще раза в минуту: опрос идёт каждую секунду, и гонять базу
+        ради секундной точности незачем.
+        """
+        now = time.monotonic()
+        if now - self._heard_at.get(channel, 0.0) < HEARD_EVERY:
+            return
+        self._heard_at[channel] = now
+        try:
+            self.store.set_setting(HEARD_KEY.format(channel=channel), now_iso())
+        except Exception as exc:                            # noqa: BLE001
+            print(f"мост: не записал, когда слышал {channel}: {exc}", flush=True)
 
     def _look_at_the_clock(self) -> int:
         try:
@@ -255,6 +276,7 @@ class Bridge:
         """
         told = 0
         for job in self.store.mark_running_interrupted():
+            self._put_out_orphan(job)
             receiver = self.receivers.get(job["channel"])
             head = (job["prompt_head"] or "").strip().replace("\n", " ")[:60]
             _say(f"прерванная работа {job['id']}: {head}")
@@ -270,6 +292,29 @@ class Bridge:
                 self.store.note("error", channel=job["channel"], chat_id=job["chat_id"],
                                 text=self._mask(f"не сказал о прерванной работе: {exc}")[:200])
         return told
+
+    def _put_out_orphan(self, job) -> bool:
+        """Нейросеть, пережившая падение моста, гасится при следующем запуске.
+
+        `claude` запускается своей группой процессов и переживает смерть
+        родителя нарочно (перезапуск юнита не должен рвать работу). Но мост,
+        упавший насовсем, оставляет её в папке навсегда: она пишет файлы, за
+        которые уже никто не отвечает, и ест память. Гасим — но только то,
+        в чём узнаём нейросеть: номера процессов переиспользуются.
+        """
+        try:
+            pid = job["pid"]
+        except (IndexError, KeyError):
+            return False
+        # `looks_like_claude` заодно отвечает и на «а жив ли он вообще»:
+        # у мёртвого процесса спросить нечего, и гасить нечего.
+        if not pid or not lock.looks_like_claude(pid):
+            return False
+        lock.kill_tree(pid)
+        _say(f"погасила нейросеть, оставшуюся от прошлого запуска (процесс {pid})")
+        self.store.note("stopped", channel=job["channel"], chat_id=job["chat_id"],
+                        text=f"погасила осиротевшую нейросеть, процесс {pid}")
+        return True
 
     def _answer(self, receiver, message) -> None:
         try:

@@ -79,3 +79,43 @@ executor:
     assert bridge.executor.extra_args == ["--setting-sources", "project"]
     assert bridge.pool.max_parallel == 2
     bridge.store.close()
+
+
+# --- этап 6: второй мост того же экземпляра ---------------------------------
+
+def test_the_second_bridge_of_the_same_name_exits_quietly(home, projects_dir, capsys):
+    """Причина третья: двое слушают одного бота. Второй не поднимается вовсе."""
+    from bridge import lock
+
+    write_config(home, f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+""")
+    held = lock.InstanceLock(home / "most.lock")
+    assert held.acquire() is True
+    try:
+        code = main(["--home", str(home), "--name", "test", "--once"])
+    finally:
+        held.release()
+
+    assert code == 0                       # чинится руками, респавн не поможет
+    out = capsys.readouterr().out
+    assert "уже запущен" in out
+    assert "Traceback" not in out
+
+
+def test_the_lock_is_let_go_after_the_run(home, projects_dir):
+    from bridge import lock
+
+    write_config(home, f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+""")
+    main(["--home", str(home), "--name", "test", "--once"])
+    second = lock.InstanceLock(home / "most.lock")
+    assert second.acquire() is True        # мост вышел — замок отпущен
+    second.release()

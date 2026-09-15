@@ -365,3 +365,57 @@ def test_summary_stays_silent_until_asked_in_the_settings(bridge):
     drain(bridge)
     bridge.broadcast("сводка за сегодня", aloud=True)
     assert bridge.receivers["telegram"].voices == []
+
+
+# --- этап 6: осиротевшая нейросеть и второй мост -----------------------------
+
+def test_an_orphan_neural_net_is_put_out_on_start(config, store, monkeypatch):
+    """Мост упал, а `claude` в папке остался жить: в следующий запуск гасим его."""
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter")
+    job_id = store.start_job(link["id"], "telegram", 500, "s-1", "считай долго", "")
+    store.set_job_pid(job_id, 4242)
+
+    killed = []
+    monkeypatch.setattr("bridge.lock.looks_like_claude", lambda pid, command=None: True)
+    monkeypatch.setattr("bridge.lock.kill_tree", lambda pid: killed.append(int(pid)) or True)
+
+    tg = FakeReceiver("telegram")
+    b = Bridge(config=config, store=store, executor=FakeExecutor(),
+               receivers={"telegram": tg}, sleeper=lambda s: None)
+    b.recover()
+
+    assert killed == [4242]
+    assert store.list_jobs()[0]["state"] == "interrupted"
+    assert any("4242" in (row["text"] or "") for row in store.recent_journal())
+
+
+def test_a_stranger_process_with_the_same_number_is_left_alone(config, store, monkeypatch):
+    """Номера процессов переиспользуются: чужую программу не гасим."""
+    link = store.upsert_link("telegram", 500, 0, project="buhgalter")
+    job_id = store.start_job(link["id"], "telegram", 500, "s-1", "считай долго", "")
+    store.set_job_pid(job_id, 4242)
+
+    killed = []
+    monkeypatch.setattr("bridge.lock.looks_like_claude", lambda pid, command=None: False)
+    monkeypatch.setattr("bridge.lock.kill_tree", lambda pid: killed.append(pid) or True)
+
+    b = Bridge(config=config, store=store, executor=FakeExecutor(),
+               receivers={"telegram": FakeReceiver("telegram")}, sleeper=lambda s: None)
+    b.recover()
+    assert killed == []
+    assert store.list_jobs()[0]["state"] == "interrupted"
+
+
+def test_the_bridge_remembers_when_it_last_heard_the_messenger(bridge, store):
+    """«Мост жив, а мессенджер молчит» — про это отвечает `status`."""
+    bridge.tick()
+    assert store.get_setting("heard:telegram")
+    assert store.get_setting("heard:max")
+
+
+def test_a_channel_that_answers_with_a_error_is_not_counted_as_heard(config, store):
+    tg = FakeReceiver("telegram", [requests.exceptions.ConnectionError("нет сети")])
+    b = Bridge(config=config, store=store, executor=FakeExecutor(),
+               receivers={"telegram": tg}, sleeper=lambda s: None)
+    b.tick()
+    assert store.get_setting("heard:telegram") is None
