@@ -299,3 +299,31 @@ def test_the_clock_of_the_bridge_is_moscow_even_when_the_machine_is_not(config, 
                       clock=lambda: datetime(2026, 9, 15, 21, 30, tzinfo=UTC))
     assert clock.now() == msk(2026, 9, 16, 0, 30)
     assert clock.now().utcoffset() == timedelta(hours=3)
+
+
+# --- кто в сводке чужой (живая приёмка 15.09) -------------------------------
+
+def test_the_summary_forgets_those_who_are_now_allowed(alarm_clock, store):
+    """Натэла стучалась до того, как её пустили, — и попала в сводку как чужая."""
+    store.note_stranger("telegram", 457475813, 457475813, "привет",
+                        name="Натэла Зубченко")
+    store.allow("telegram", 457475813, note="Натэла Зубченко")
+
+    summary = alarm_clock.summary_text(msk(2026, 9, 16, 8, 0))
+    assert "чужие не писали" in summary.lower()
+    assert "457475813" not in summary
+
+
+def test_the_summary_calls_strangers_by_name(alarm_clock, store):
+    """Номер человеку ничего не говорит, имя говорит всё."""
+    store.note_stranger("max", -1, 19520030, "а когда третий модуль",
+                        name="Екатерина Смирнова")
+    summary = alarm_clock.summary_text(msk(2026, 9, 16, 8, 0))
+    assert "Екатерина Смирнова" in summary
+    assert "19520030" not in summary
+
+
+def test_a_nameless_stranger_is_still_shown_by_number(alarm_clock, store):
+    store.note_stranger("telegram", 7, 555, "кто ты")
+    summary = alarm_clock.summary_text(msk(2026, 9, 16, 8, 0))
+    assert "555" in summary

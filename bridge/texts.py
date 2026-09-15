@@ -68,7 +68,7 @@ NOBODY_KNOCKED = "Пока никто чужой не стучался. Тихо
 
 KNOCKS_HEADER = "Вот кто писал мне, но не был в списке своих:"
 
-KNOCK_LINE = "• {at} · {channel} · id {user_id} · «{text}»"
+KNOCK_LINE = "• {at} · {channel} · {who} · «{text}»"
 
 KNOCKS_FOOTER = (
     "Если среди них вы сами — значит, в списке своих стоит другой id. "

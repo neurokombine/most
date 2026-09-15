@@ -751,3 +751,18 @@ def test_a_plain_yes_is_not_eaten_by_the_bridge(router):
     router.handle(tg("да"))
     router.pool.wait_idle()
     assert router.executor.calls
+
+
+def test_the_knocks_in_the_chat_call_people_by_name(router, store):
+    """Номер человеку ничего не говорит: себя и чужого он узнаёт по имени."""
+    store.note_stranger("max", -1, 19520030, "а когда третий модуль",
+                        name="Екатерина Смирнова")
+    answer = "\n".join(router.handle(tg("кто стучался")))
+    assert "Екатерина Смирнова" in answer
+    assert "Max" in answer and "max ·" not in answer
+
+
+def test_a_nameless_knock_is_shown_by_number(router, store):
+    store.note_stranger("telegram", 7, 555, "кто ты")
+    answer = "\n".join(router.handle(tg("кто стучался")))
+    assert "555" in answer

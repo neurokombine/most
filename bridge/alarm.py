@@ -154,6 +154,17 @@ def clock_face(hour: int, minute: int) -> str:
     return f"{hour}:{minute:02d}"
 
 
+def stranger_name(row) -> str:
+    """Как назвать постучавшегося: именем, а номером — только если имени нет.
+
+    Своего номера в мессенджере человек не знает и знать не должен, а чужого
+    тем более: «Екатерина Смирнова (Max)» говорит ему всё, «id 19520030» — ничего.
+    """
+    channel = texts.CHANNEL_NAMES.get(row["channel"], row["channel"])
+    name = str(row["name"] or "").strip() if "name" in row.keys() else ""
+    return f"{name} ({channel})" if name else f"id {row['user_id']} ({channel})"
+
+
 def when_text(moment: datetime, tz=None) -> str:
     """Дата и время человеку — всегда с пометкой МСК, чтобы не гадать, чья зона."""
     return moment.astimezone(tz or zone()).strftime("%d.%m %H:%M МСК")
@@ -611,10 +622,13 @@ class Scheduler:
         lines.append(texts.SUMMARY_COST.format(cost=money(spent)) if known
                      else texts.SUMMARY_COST_UNKNOWN)
 
-        strangers = self.store.strangers_since(since)
+        # Чужой — это тот, кого нет в списке своих сейчас, а не тот, кого не
+        # было вчера вечером. Живая приёмка 15.09: Натэла стучалась до того,
+        # как её пустили, и утром попала в собственную сводку как чужая.
+        strangers = [row for row in self.store.strangers_since(since)
+                     if not self.store.is_allowed(row["channel"], row["user_id"])]
         if strangers:
-            who = ", ".join(sorted({f"id {row['user_id']} ({row['channel']})"
-                                    for row in strangers}))
+            who = ", ".join(sorted({stranger_name(row) for row in strangers}))
             lines.append(texts.SUMMARY_STRANGERS.format(
                 count=len(strangers), times=plural(len(strangers), ("раз", "раза", "раз")),
                 who=who))

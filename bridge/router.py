@@ -317,8 +317,12 @@ class Router:
         lines = [texts.KNOCKS_HEADER]
         for row in knocks:
             lines.append(texts.KNOCK_LINE.format(
-                at=to_moscow(row["at"]), channel=row["channel"],
-                user_id=row["user_id"], text=row["text"] or ""))
+                at=to_moscow(row["at"]),
+                channel=CHANNEL_NAMES.get(row["channel"], row["channel"]),
+                # Имя, а номер — только если имени мессенджер не дал: себя
+                # и чужого человек узнаёт по имени, а не по числу.
+                who=(str(row["name"] or "").strip() or f"id {row['user_id']}"),
+                text=row["text"] or ""))
         lines.append("")
         lines.append(texts.KNOCKS_FOOTER)
         return "\n".join(lines)
