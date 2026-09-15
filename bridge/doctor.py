@@ -138,7 +138,8 @@ def check_network(channel: str, session=None, token: str = "") -> Check:
     return Check(True, f"сеть до {channel} есть, бот отзывается")
 
 
-def checkup(config, session=None, claude_bin: str | None = None) -> list[Check]:
+def checkup(config, session=None, claude_bin: str | None = None, live: bool = False,
+            store=None) -> list[Check]:
     """Полный обход. Сессию и путь к claude можно подменить — так его зовут тесты."""
     checks = [check_config(config), check_projects(config), check_claude(claude_bin),
               check_voice(config)]
@@ -146,3 +147,15 @@ def checkup(config, session=None, claude_bin: str | None = None) -> list[Check]:
         token = getattr(config.channel(channel), "token", "")
         checks.append(check_network(channel, session=session, token=token))
     return checks
+
+
+def table(checks: list[Check]) -> list[str]:
+    """Вывод доктора таблицей: в порядке · нет · что сделать."""
+    return [line for check in checks for line in check.line().split("\n")]
+
+
+def verdict(checks: list[Check], config=None) -> str:
+    bad = [c for c in checks if not c.ok]
+    if not bad:
+        return texts.SELFTEST_ALL_GOOD
+    return texts.SELFTEST_TROUBLE.format(bad=len(bad), all=len(checks))

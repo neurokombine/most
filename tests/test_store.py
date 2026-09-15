@@ -340,3 +340,10 @@ def test_a_running_job_remembers_its_pid(store):
     assert [(r["id"], r["pid"]) for r in rows] == [(job_id, 4242)]
     assert store.mark_running_interrupted()[0]["pid"] == 4242
     assert store.running_jobs() == []
+
+
+def test_the_allowlist_of_the_settings_is_merged_without_losing_anyone(store):
+    """Команда добирает своих из файла, но не выбрасывает тех, кого пустили на ходу."""
+    store.allow("telegram", 999)
+    assert store.merge_allowlist("telegram", [111, 999]) == 1
+    assert {r["user_id"] for r in store.list_allowed("telegram")} == {111, 999}

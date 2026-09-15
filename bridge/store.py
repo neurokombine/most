@@ -298,6 +298,21 @@ class Store:
                 "INSERT OR IGNORE INTO allowlist(channel, user_id, added_at) VALUES(?,?,?)",
                 (channel, int(user_id), now_iso()))
 
+    def merge_allowlist(self, channel: str, user_ids: list[int]) -> int:
+        """Добирает в базу тех, кто есть в настройках, никого не убирая.
+
+        Так делают команды: базу читает живой демон, и выдёргивать из неё
+        человека, которого только что пустили, командой «покажи своих» нельзя.
+        Полную сверку с файлом делает запуск моста (`sync_allowlist`).
+        """
+        added = 0
+        for user_id in user_ids or []:
+            try:
+                added += 1 if self.allow(channel, int(user_id)) else 0
+            except (TypeError, ValueError):
+                continue
+        return added
+
     def allow(self, channel: str, user_id: int, note: str | None = None) -> bool:
         """Пускает человека. True — значит, раньше его в списке не было.
 

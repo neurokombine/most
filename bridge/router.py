@@ -31,7 +31,7 @@ from .works import WorkPool
 MOSCOW = alarm.zone()
 
 LIMITS = {"telegram": narrator.TELEGRAM_LIMIT, "max": narrator.MAX_LIMIT}
-CHANNEL_NAMES = {"telegram": "телеграм", "max": "Max"}
+CHANNEL_NAMES = texts.CHANNEL_NAMES
 
 # Ключи в settings: чем платить за две колонки в базе, если хватает двух строк.
 LAST_INCOMING_KEY = "last_incoming:{link_id}"

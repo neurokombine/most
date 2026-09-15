@@ -282,3 +282,86 @@ schedule:
 """)
     cfg = load_config(home=home, name="test")
     assert cfg.schedule.summary_at == "08:00"
+
+
+# --- этап 6: белый список правит нейросеть, а комментарии остаются -----------
+
+import yaml  # noqa: E402
+
+from bridge.config import add_to_allowlist, remove_from_allowlist  # noqa: E402
+
+
+def allowed(path, channel):
+    return (yaml.safe_load(path.read_text(encoding="utf-8")) or {})[channel]["allowlist"]
+
+
+def test_an_id_is_added_to_an_empty_inline_list(home):
+    path = home / "config.yaml"
+    path.write_text("""# Настройки моста.
+telegram:
+  token: "abc:123"   # токен от отца ботов
+  allowlist: []      # ваши Telegram id
+
+projects_dir: "/home/u/projects"
+""", encoding="utf-8")
+    assert add_to_allowlist(path, "telegram", 555) == "added"
+    assert allowed(path, "telegram") == [555]
+    body = path.read_text(encoding="utf-8")
+    assert "# токен от отца ботов" in body          # пояснения остались на месте
+    assert "# ваши Telegram id" in body
+
+
+def test_an_id_is_added_to_a_list_that_is_not_empty(home):
+    path = home / "config.yaml"
+    path.write_text('telegram:\n  token: "t"\n  allowlist: [111]\n', encoding="utf-8")
+    assert add_to_allowlist(path, "telegram", 222) == "added"
+    assert allowed(path, "telegram") == [111, 222]
+    assert add_to_allowlist(path, "telegram", 222) == "already"
+
+
+def test_an_id_is_added_to_a_list_written_in_lines(home):
+    path = home / "config.yaml"
+    path.write_text('max:\n  token: "t"\n  allowlist:\n    - 111\n', encoding="utf-8")
+    assert add_to_allowlist(path, "max", 222) == "added"
+    assert allowed(path, "max") == [111, 222]
+
+
+def test_a_missing_allowlist_is_written_from_scratch(home):
+    path = home / "config.yaml"
+    path.write_text('telegram:\n  token: "t"\n\nprojects_dir: "/tmp"\n', encoding="utf-8")
+    assert add_to_allowlist(path, "telegram", 555) == "added"
+    assert allowed(path, "telegram") == [555]
+
+
+def test_a_channel_that_is_not_in_the_settings_is_named_plainly(home):
+    path = home / "config.yaml"
+    path.write_text('telegram:\n  token: "t"\n  allowlist: []\n', encoding="utf-8")
+    assert add_to_allowlist(path, "max", 555) == "no_channel"
+
+
+def test_an_id_is_taken_away(home):
+    path = home / "config.yaml"
+    path.write_text('telegram:\n  token: "t"\n  allowlist: [111, 222]  # свои\n',
+                    encoding="utf-8")
+    assert remove_from_allowlist(path, "telegram", 111) == "removed"
+    assert allowed(path, "telegram") == [222]
+    assert remove_from_allowlist(path, "telegram", 111) == "already"
+    assert "# свои" in path.read_text(encoding="utf-8")
+
+
+def test_an_id_is_taken_away_from_lines(home):
+    path = home / "config.yaml"
+    path.write_text('max:\n  token: "t"\n  allowlist:\n    - 111\n    - 222\n', encoding="utf-8")
+    assert remove_from_allowlist(path, "max", 111) == "removed"
+    assert allowed(path, "max") == [222]
+
+
+def test_the_file_with_the_token_stays_closed_to_others(home):
+    import os
+    import stat
+    path = home / "config.yaml"
+    path.write_text('telegram:\n  token: "t"\n  allowlist: []\n', encoding="utf-8")
+    os.chmod(path, 0o600)
+    add_to_allowlist(path, "telegram", 555)
+    mode = stat.S_IMODE(path.stat().st_mode)
+    assert mode == 0o600

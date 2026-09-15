@@ -119,3 +119,39 @@ projects_dir: "{projects_dir}"
     second = lock.InstanceLock(home / "most.lock")
     assert second.acquire() is True        # мост вышел — замок отпущен
     second.release()
+
+
+def test_a_command_does_not_start_the_daemon(home, projects_dir, capsys):
+    """`who` — это вопрос к базе, а не запуск моста: бота он не отбирает."""
+    write_config(home, f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+""")
+    code = main(["--home", str(home), "--name", "test", "who"])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "111" in out
+    assert "слушаю" not in out                 # демон не поднимался
+
+
+def test_a_command_can_answer_a_machine(home, projects_dir, capsys):
+    import json
+    write_config(home, f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+""")
+    code = main(["--home", str(home), "--name", "test", "--json", "status"])
+    data = json.loads(capsys.readouterr().out)
+    assert code == 1                           # мост не запущен — это и сказано
+    assert data["running"] is False
+
+
+def test_a_command_without_settings_says_what_to_do(home, capsys):
+    code = main(["--home", str(home), "--name", "test", "knock"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "config.yaml" in out

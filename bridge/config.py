@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -252,3 +253,140 @@ def load_config(home: Path | None = None, name: str = "default",
         timezone=str(raw.get("timezone") or DEFAULT_TIMEZONE).strip() or DEFAULT_TIMEZONE,
         schedule=_schedule(raw.get("schedule")),
     )
+
+
+# --- белый список правится на месте, а пояснения в файле остаются ------------
+# Список своих живёт в config.yaml, и он — источник правды: при запуске мост
+# переливает его в базу. Значит, «пусти меня» должно доходить до файла, иначе
+# человек снова станет чужим после перезагрузки. Правим файл строками, а не
+# перезаписью через yaml: в заготовке живут пояснения, ради которых её и писали,
+# а `yaml.safe_dump` вычистил бы их все.
+
+ALLOWLIST_RE = re.compile(r"^(?P<indent>\s*)allowlist\s*:\s*(?P<rest>.*)$")
+ITEM_RE = re.compile(r"^\s*-\s*(?P<id>\d+)")
+
+
+def _channel_block(lines: list[str], channel: str) -> tuple[int, int] | None:
+    """Где в файле лежит раздел мессенджера: от строки «telegram:» до следующего раздела."""
+    start = None
+    for i, line in enumerate(lines):
+        if re.match(rf"^{re.escape(channel)}\s*:\s*(#.*)?$", line):
+            start = i
+            break
+    if start is None:
+        return None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        line = lines[j]
+        if line.strip() and not line[:1].isspace() and not line.lstrip().startswith("#"):
+            end = j
+            break
+    return start, end
+
+
+def _inline_ids(rest: str) -> tuple[list[int], str] | None:
+    """Разбирает «[111, 222]  # свои» на числа и хвост-пояснение."""
+    if not rest.startswith("["):
+        return None
+    close = rest.find("]")
+    if close < 0:
+        return None
+    ids = [int(n) for n in re.findall(r"\d+", rest[1:close])]
+    return ids, rest[close + 1:]
+
+
+def _verify(path: Path, channel: str, want: list[int], body: str) -> bool:
+    """Правку принимаем, только если файл после неё читается и список тот самый."""
+    try:
+        raw = yaml.safe_load(body) or {}
+        got = [int(x) for x in ((raw.get(channel) or {}).get("allowlist") or [])]
+    except (yaml.YAMLError, TypeError, ValueError, AttributeError):
+        return False
+    return got == want
+
+
+def _save(path: Path, body: str) -> None:
+    """Пишем на место, не открывая файл с токеном чужим глазам."""
+    mode = None
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError:
+        pass
+    path.write_text(body, encoding="utf-8")
+    os.chmod(path, mode if mode is not None else 0o600)
+
+
+def _write_allowlist(path: Path, channel: str, user_id: int, add: bool) -> str:
+    """Общая часть «пусти» и «не пускай». Ответ — словом, чтобы было что сказать человеку."""
+    try:
+        body = path.read_text(encoding="utf-8")
+    except OSError:
+        return "failed"
+    lines = body.splitlines()
+    block = _channel_block(lines, channel)
+    if block is None:
+        return "no_channel"
+    start, end = block
+
+    where = None
+    for i in range(start + 1, end):
+        found = ALLOWLIST_RE.match(lines[i])
+        if found:
+            where = (i, found)
+            break
+
+    user_id = int(user_id)
+    if where is None:
+        if not add:
+            return "already"
+        lines.insert(start + 1, f"  allowlist: [{user_id}]")
+        ids = [user_id]
+    else:
+        i, found = where
+        indent, rest = found.group("indent"), found.group("rest").strip()
+        inline = _inline_ids(rest)
+        if inline is not None:
+            ids, tail = inline
+            if (user_id in ids) == add:
+                return "already"
+            ids = ids + [user_id] if add else [n for n in ids if n != user_id]
+            lines[i] = f"{indent}allowlist: [{', '.join(str(n) for n in ids)}]{tail}"
+        else:
+            # Список строками: «allowlist:» и ниже «  - 111».
+            item_lines = []
+            for j in range(i + 1, end):
+                if ITEM_RE.match(lines[j]):
+                    item_lines.append(j)
+                elif lines[j].strip() and not lines[j].lstrip().startswith("#"):
+                    break
+            ids = [int(ITEM_RE.match(lines[j]).group("id")) for j in item_lines]
+            if (user_id in ids) == add:
+                return "already"
+            if add:
+                step = lines[item_lines[-1]] if item_lines else f"{indent}  - 0"
+                mark = step[:len(step) - len(step.lstrip())]
+                lines.insert((item_lines[-1] if item_lines else i) + 1, f"{mark}- {user_id}")
+                ids = ids + [user_id]
+            else:
+                for j in reversed(item_lines):
+                    if int(ITEM_RE.match(lines[j]).group("id")) == user_id:
+                        lines.pop(j)
+                ids = [n for n in ids if n != user_id]
+                if not ids:
+                    lines[i] = f"{indent}allowlist: []"
+
+    fresh = "\n".join(lines) + ("\n" if body.endswith("\n") else "")
+    if not _verify(path, channel, ids, fresh):
+        return "failed"
+    _save(path, fresh)
+    return "added" if add else "removed"
+
+
+def add_to_allowlist(path: Path | str, channel: str, user_id: int) -> str:
+    """Вписывает человека в свои. Ответ: added · already · no_channel · failed."""
+    return _write_allowlist(Path(path), channel, user_id, add=True)
+
+
+def remove_from_allowlist(path: Path | str, channel: str, user_id: int) -> str:
+    """Убирает человека из своих. Ответ: removed · already · no_channel · failed."""
+    return _write_allowlist(Path(path), channel, user_id, add=False)
