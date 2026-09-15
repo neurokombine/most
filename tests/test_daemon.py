@@ -275,3 +275,42 @@ def test_incoming_file_reaches_the_router_with_its_receiver(bridge, tmp_path):
     drain(bridge)
     assert (project / "входящие" / "акт.pdf").exists()
     assert "входящие" in "\n".join(text for _, text in tg.sent)
+
+
+def test_the_whole_way_of_a_file_through_the_real_telegram_receiver(config, store, tmp_path):
+    """Сквозь настоящий разбор апдейта и настоящую сборку запроса, но без сети."""
+    from bridge.receivers.telegram import TelegramReceiver
+    from tests.fakes import FakeResponse, FakeSession
+
+    projects = tmp_path / "папки проектов"
+    (projects / "бухгалтерия за сентябрь").mkdir(parents=True)
+    config.projects_dir = projects
+    store.sync_allowlist("telegram", [111])
+
+    session = FakeSession([
+        # 1 · пришёл документ
+        FakeResponse(200, {"ok": True, "result": [{"update_id": 1, "message": {
+            "message_id": 1, "from": {"id": 111}, "chat": {"id": 500, "type": "private"},
+            "document": {"file_id": "f1", "file_name": "акт сверки.pdf",
+                         "file_size": 5}}}]}),
+        FakeResponse(200, {"ok": True, "result": {"file_path": "documents/f1.pdf"}}),
+        FakeResponse(200, content=b"12345"),
+        FakeResponse(200, {"ok": True}),                     # ответ «положила»
+        # 2 · «пришли мне акт»
+        FakeResponse(200, {"ok": True, "result": [{"update_id": 2, "message": {
+            "message_id": 2, "from": {"id": 111}, "chat": {"id": 500, "type": "private"},
+            "text": "пришли мне акт"}}]}),
+        FakeResponse(200, {"ok": True, "result": {"message_id": 9}}),
+    ])
+    receiver = TelegramReceiver(token="123:abc", store=store, session=session)
+    bridge = Bridge(config=config, store=store, executor=FakeExecutor(),
+                    receivers={"telegram": receiver}, sleeper=lambda s: None)
+
+    bridge.tick()
+    saved = projects / "бухгалтерия за сентябрь" / "входящие" / "акт сверки.pdf"
+    assert saved.read_bytes() == b"12345"
+
+    bridge.tick()
+    out = [c for c in session.calls if "sendDocument" in c["url"]]
+    assert len(out) == 1
+    assert out[0]["files"]["document"][0] == "акт сверки.pdf"
