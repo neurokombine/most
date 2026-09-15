@@ -299,7 +299,8 @@ def say(config, store, args, receivers=None) -> Answer:
         except Exception as exc:                            # noqa: BLE001
             from .receivers.base import mask
             lines.append(texts.CLI_SAY_FAILED.format(
-                channel=channel_name(channel), problem=mask(exc, config.secrets())))
+                channel=channel_name(channel), name=config.name,
+                problem=mask(exc, config.secrets())))
     if not said:
         lines.append(texts.CLI_SAY_NOWHERE)
         return Answer(lines, {"said": []}, code=1)
