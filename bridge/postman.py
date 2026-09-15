@@ -32,8 +32,9 @@ RECENT_LIMIT = 10
 
 # Чем достраиваем имя, когда мессенджер прислал файл без него (так приходят
 # снимки с телефона) или без расширения.
-EXTENSIONS = {"photo": ".jpg", "image": ".jpg", "video": ".mp4",
-              "audio": ".m4a", "voice": ".ogg", "file": ".bin", "document": ".bin"}
+EXTENSIONS = {"photo": ".jpg", "image": ".jpg", "video": ".mp4", "audio": ".m4a",
+              "voice": ".ogg", "video_note": ".mp4",       # кружок — это видео, не ogg
+              "file": ".bin", "document": ".bin"}
 
 BAD_CHARS = re.compile(r"[\\/\x00-\x1f]+")
 SPLIT = re.compile(r"[^0-9a-zа-я]+")

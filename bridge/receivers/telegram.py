@@ -30,8 +30,8 @@ FILE_TIMEOUT = 180
 # и документ, и подпись, но два файла в одном сообщении Telegram не пришлёт.
 # Голосовое стоит первым: с этапа 4 мост его слышит, и разбирать его надо
 # раньше остальных полей.
-FILE_FIELDS = (("voice", "voice"), ("document", "file"), ("photo", "photo"),
-               ("video", "video"), ("audio", "audio"), ("video_note", "voice"))
+FILE_FIELDS = (("voice", "voice"), ("video_note", "video_note"), ("document", "file"),
+               ("photo", "photo"), ("video", "video"), ("audio", "audio"))
 TOO_BIG_MARKS = ("file is too big", "file_id_invalid_too_big")
 # Что Telegram покажет голосовым кружком, а что — обычным аудио-файлом.
 VOICE_SUFFIXES = (".ogg", ".oga", ".opus")

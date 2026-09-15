@@ -337,3 +337,15 @@ def test_too_big_voice_answer_is_refused(store, tmp_path):
     r.upload_limit = 0
     with pytest.raises(FileTooBig):
         r.send_voice(500, path)
+
+
+def test_video_note_is_heard_as_a_voice_message(store):
+    """Кружок — тоже речь, но файл у него mp4, а не ogg."""
+    upd = {"update_id": 42, "message": {"message_id": 42, "from": {"id": 111},
+                                        "chat": {"id": 500, "type": "private"},
+                                        "video_note": {"file_id": "vn", "duration": 9,
+                                                       "file_size": 500}}}
+    r = make(store, [FakeResponse(200, {"ok": True, "result": [upd]})])
+    att = r.poll_once()[0].attachments[0]
+    assert att.kind == "video_note"
+    assert att.duration == 9

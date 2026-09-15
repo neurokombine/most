@@ -221,3 +221,11 @@ def test_voice_answer_trouble_does_not_eat_the_text(config, store):
     said = finish(r, receiver)
     assert "Готово." in "\n".join(said)
     r.pool.stop_all()
+
+
+def test_video_note_goes_the_voice_way(router, projects_dir):
+    """Кружок расшифровывается так же, как голосовое, и ложится mp4."""
+    answers = answers_of(router, with_voice(kind="video_note"))
+    assert "слышала" in answers[0].lower()
+    saved = list((projects_dir / "analitika" / postman.INBOX / postman.VOICE_DIR).iterdir())
+    assert saved[0].suffix == ".mp4"
