@@ -329,6 +329,7 @@ class FakeReceiver:
         self.trouble = trouble
         self.sent_files = []
         self.sent_texts = []
+        self.sent_voices = []
 
     def fetch(self, attachment):
         if self.trouble is not None:
@@ -340,6 +341,9 @@ class FakeReceiver:
 
     def send_file(self, chat_id, path, caption=""):
         self.sent_files.append((chat_id, Path(path), caption))
+
+    def send_voice(self, chat_id, path, caption=""):
+        self.sent_voices.append((chat_id, Path(path), caption))
 
 
 class FakePostbox:

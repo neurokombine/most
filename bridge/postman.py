@@ -25,6 +25,7 @@ from pathlib import Path
 from .changes import SKIP_DIRS
 
 INBOX = "входящие"          # имя папки, которое видит человек
+VOICE_DIR = "голос"         # записи лежат отдельно: их не «прислали», их наговорили
 MOSCOW = timezone(timedelta(hours=3))
 FIND_LIMIT = 10
 RECENT_LIMIT = 10
@@ -70,15 +71,22 @@ def free_path(folder: Path, name: str) -> Path:
 
 # --- входящие ---------------------------------------------------------------
 
-def inbox_dir(workdir: Path | str) -> Path:
+def inbox_dir(workdir: Path | str, subdir: str = "") -> Path:
     folder = Path(workdir) / INBOX
+    if subdir:
+        folder = folder / subdir
     folder.mkdir(parents=True, exist_ok=True)
     return folder
 
 
-def save_incoming(workdir: Path | str, name: str, data: bytes, kind: str = "file") -> Path:
-    """Кладёт присланное в «входящие» и отдаёт путь, который можно назвать вслух."""
-    folder = inbox_dir(workdir)
+def save_incoming(workdir: Path | str, name: str, data: bytes, kind: str = "file",
+                  subdir: str = "") -> Path:
+    """Кладёт присланное в «входящие» и отдаёт путь, который можно назвать вслух.
+
+    `subdir` — подпапка внутри «входящих»: голосовые ложатся в «голос», чтобы
+    десяток записей не мешался под ногами у присланных документов.
+    """
+    folder = inbox_dir(workdir, subdir)
     path = free_path(folder, safe_name(name, kind=kind))
     path.write_bytes(data)
     return path

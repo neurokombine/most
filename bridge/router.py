@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import changes, narrator, postman, texts
+from . import changes, narrator, postman, texts, voice
 from .executor import Executor
 from .receivers.base import FileTooBig, Incoming, mask
 from .works import WorkPool
@@ -68,6 +68,18 @@ FILE_STOPWORDS = {"мне", "сюда", "нам", "файл", "файлик", "�
 NOT_A_FILE = {"ответ", "ответы", "сообщение", "сообщения", "текст", "смс", "письмо"}
 HELP_RE = re.compile(r"^\s*(?:/?help|/start|помощь|что\s+ты\s+умеешь)\s*$", re.IGNORECASE)
 
+# --- голос ------------------------------------------------------------------
+# Что считаем записанной речью, а не файлом: голосовое Telegram, кружок и
+# аудио-вложение обоих мессенджеров. Такое не ложится документом в «входящие»,
+# а расшифровывается и становится заданием.
+VOICE_KINDS = ("voice", "audio")
+# Голосом наружу — только по просьбе. Слово «прочитай» тут не про чтение файла:
+# «прочитай, что получилось» человек говорит, когда хочет услышать ответ.
+SPEAK_RE = re.compile(r"ответь\s+голосом|скажи\s+голосом|голосом\s+ответь|"
+                      r"озвучь|проговори|прочитай\b|прочти\b", re.IGNORECASE)
+# Про ненастроенный голос наружу говорим один раз на экземпляр, а не каждый ответ.
+VOICE_OUT_TOLD_KEY = "voice_out_told"
+
 
 @dataclass
 class Reply:
@@ -109,10 +121,15 @@ def how_long(seconds) -> str:
 
 class Router:
     def __init__(self, config, store, executor: Executor, pool: WorkPool | None = None,
-                 postbox=None):
+                 postbox=None, ears=None, mouth=None):
         self.config = config
         self.store = store
         self.executor = executor
+        # Слух и голос — за интерфейсами: в тестах подставные, в бою
+        # faster-whisper и piper, а если их нет — честная деградация в текст.
+        built_ears, built_mouth = voice.build(config)
+        self.ears = ears if ears is not None else built_ears
+        self.mouth = mouth if mouth is not None else built_mouth
         # Почтовый ящик — мост целиком: через него уходит то, что мост шлёт сам,
         # во все настроенные мессенджеры разом (сводки и «отдай»).
         self.postbox = postbox
@@ -159,12 +176,22 @@ class Router:
 
         limit = LIMITS.get(incoming.channel, narrator.TELEGRAM_LIMIT)
 
-        if getattr(incoming, "attachments", None):
+        attachments = list(getattr(incoming, "attachments", None) or [])
+        spoken = [a for a in attachments if getattr(a, "kind", "") in VOICE_KINDS]
+        if spoken:
+            return self._incoming_voice(incoming, spoken[0], receiver, limit)
+        if attachments:
             return self._incoming_files(incoming, receiver, limit)
 
         if not text:
             return []
 
+        return self._words(incoming, text, limit, receiver)
+
+    def _words(self, incoming: Incoming, text: str, limit: int, receiver=None) -> list[str]:
+        """Разбор словами. Отдельно от `handle`, потому что сюда же приходит
+        расшифрованное голосовое: «стоп», сказанное вслух, должно останавливать
+        работу, а не уходить заданием нейросети."""
         if WHERE_FILE_RE.search(text):
             return narrator.chunk(self._where_is_the_file(incoming), limit)
         if RESULT_RE.match(text):
@@ -370,6 +397,115 @@ class Router:
 
         return narrator.chunk("\n\n".join(s for s in said if s), limit)
 
+    # --- этап 4: голос ------------------------------------------------------
+
+    def _incoming_voice(self, incoming: Incoming, attachment, receiver, limit: int) -> list[str]:
+        """Голосовое: сохранить, расшифровать на самой машине, работать как обычно.
+
+        Расшифровка идёт прямо здесь, в главном потоке: тридцать секунд речи —
+        это двадцать секунд ожидания (замер на четырёх ядрах). Уводить её в
+        рабочий поток нельзя, потому что дальше расшифровка может оказаться
+        командой «стоп», а не заданием.
+        """
+        link, workdir = self._workdir_of(incoming)
+        if link is None:
+            return narrator.chunk(texts.PROJECT_NONE, limit)
+        if receiver is None:
+            self.store.note("error", channel=incoming.channel, chat_id=incoming.chat_id,
+                            text="голосовое пришло, а приёмника нет — забрать нечем")
+            return []
+
+        max_seconds = int(getattr(getattr(self.config, "voice", None), "max_seconds",
+                                  voice.MAX_SECONDS) or voice.MAX_SECONDS)
+        # Длину Telegram называет сразу — значит, длинное можно отвергнуть,
+        # не тратя ни трафика, ни минут расшифровки.
+        if attachment.duration and attachment.duration > max_seconds:
+            return narrator.chunk(texts.VOICE_TOO_LONG, limit)
+
+        channel = CHANNEL_NAMES.get(incoming.channel, incoming.channel)
+        try:
+            body = receiver.fetch(attachment)
+        except FileTooBig as too_big:
+            return narrator.chunk(texts.FILE_TOO_BIG_IN.format(
+                name="запись", channel=channel,
+                size=postman.human_size(too_big.size or attachment.size),
+                limit=postman.human_size(too_big.limit or receiver.download_limit)), limit)
+        except Exception as exc:                        # noqa: BLE001
+            self.store.note("error", channel=incoming.channel, chat_id=incoming.chat_id,
+                            text=self._mask(exc)[:200])
+            return narrator.chunk(texts.FILE_NOT_TAKEN.format(name="запись"), limit)
+
+        path = postman.save_incoming(workdir, attachment.file_name, body,
+                                     kind=attachment.kind or "voice",
+                                     subdir=postman.VOICE_DIR)
+        self.store.set_setting(LAST_INCOMING_KEY.format(link_id=link["id"]), str(path))
+
+        if not self.ears.available():
+            return narrator.chunk(texts.VOICE_NOT_SET_UP + "\n\n"
+                                  + texts.VOICE_SAVED_WHERE.format(path=path), limit)
+
+        try:
+            said = self.ears.transcribe(path, max_seconds=max_seconds)
+        except voice.VoiceTooLong:
+            return narrator.chunk(texts.VOICE_TOO_LONG, limit)
+        except voice.VoiceNotSetUp:
+            return narrator.chunk(texts.VOICE_NOT_SET_UP + "\n\n"
+                                  + texts.VOICE_SAVED_WHERE.format(path=path), limit)
+        except Exception as exc:                        # noqa: BLE001
+            self.store.note("error", channel=incoming.channel, chat_id=incoming.chat_id,
+                            text=self._mask(f"не расшифровала: {exc}")[:200])
+            return narrator.chunk(texts.VOICE_NOT_HEARD, limit)
+
+        said = (said or "").strip()
+        if not said:
+            return narrator.chunk(texts.VOICE_NOT_HEARD, limit)
+
+        # Сначала — что услышала, и только потом работа: человек должен увидеть
+        # свои слова раньше, чем ждать полминуты ответа не на тот вопрос.
+        heard = narrator.chunk(texts.VOICE_HEARD.format(text=voice.shorten(said)), limit)
+        caption = (incoming.text or "").strip()
+        task = f"{caption}\n\n{said}" if caption else said
+        return heard + self._words(incoming, task, limit, receiver)
+
+    # --- голос наружу -------------------------------------------------------
+
+    def voice_after_work(self, work, answers, receiver) -> list[str]:
+        """Читает ответ вслух, если об этом просили. Зовёт главный цикл после текста."""
+        if not (work.meta or {}).get("voice"):
+            return []
+        text = "\n\n".join(a for a in answers if a)
+        return self.speak(work.chat_id, text, receiver)
+
+    def speak(self, chat_id: int, text: str, receiver) -> list[str]:
+        """Отправляет текст голосом. Возвращает, что ещё сказать словами."""
+        if receiver is None or not (text or "").strip():
+            return []
+        if not self.mouth.available():
+            if self.store.get_setting(VOICE_OUT_TOLD_KEY):
+                return []
+            self.store.set_setting(VOICE_OUT_TOLD_KEY, "1")
+            return [texts.VOICE_OUT_NOT_SET_UP]
+
+        record = None
+        try:
+            record = self.mouth.say(text, self._voice_out_dir())
+            # ogg/opus — голосовое сообщение; нет ffmpeg — уйдёт обычным аудио.
+            sound = voice.to_ogg(record) or record
+            receiver.send_voice(chat_id, sound, caption="")
+        except voice.VoiceNotSetUp:
+            return [texts.VOICE_OUT_NOT_SET_UP]
+        except Exception as exc:                        # noqa: BLE001
+            self.store.note("error", chat_id=chat_id, text=self._mask(exc)[:200])
+            return [texts.VOICE_NOT_SENT]
+        finally:
+            _clean_up(record)
+        return []
+
+    def _voice_out_dir(self) -> Path:
+        folder = Path(getattr(self.config, "home", Path.cwd())) / "voice-out"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
     def _where_is_the_file(self, incoming: Incoming) -> str:
         """«Куда ты положила то, что я прислала» — мост отвечает сам, по своей записи."""
         link = self.store.get_link(incoming.channel, incoming.chat_id, incoming.thread_id)
@@ -489,6 +625,9 @@ class Router:
                                 resume=bool(link["session_started"]))
         if work is None:                      # кто-то успел раньше на доли секунды
             return narrator.chunk(texts.ALREADY_WORKING, limit)
+        # «Ответь голосом» относится к этой работе и только к ней: следующая
+        # задача снова отвечает текстом, пока не попросят вслух ещё раз.
+        work.meta["voice"] = bool(SPEAK_RE.search(text))
         return narrator.chunk(texts.WORK_ACCEPTED, limit)
 
     # --- ответ, когда работа кончилась --------------------------------------
@@ -562,6 +701,15 @@ def _looks_like_a_file_request(name: str) -> bool:
         return True                       # «пришли мне этот файл» — спросим, какой
     first = query.split()[0].lower().strip(".,!?«»\"'")
     return first not in NOT_A_FILE
+
+
+def _clean_up(path) -> None:
+    """Записанный ответ на диске не залёживается: он уже ушёл в чат."""
+    for candidate in ([Path(path), Path(path).with_suffix(".ogg")] if path else []):
+        try:
+            candidate.unlink()
+        except OSError:
+            pass
 
 
 def _file_lines(paths, workdir) -> str:
