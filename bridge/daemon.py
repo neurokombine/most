@@ -74,7 +74,7 @@ class Bridge:
     def _stop_channel(self, channel: str, reason: str) -> None:
         self.receivers.pop(channel, None)
         self.store.note("stopped", channel=channel, text=reason)
-        _say(f"{channel}: {reason}")
+        _say(f"{texts.CHANNEL_NAMES.get(channel, channel)}: {reason}")
 
     # --- один заход ---------------------------------------------------------
 

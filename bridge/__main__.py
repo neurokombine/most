@@ -82,7 +82,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     bridge = build_bridge(config)
-    channels = ", ".join(config.enabled_channels()) or "нет"
+    channels = ", ".join(texts.CHANNEL_NAMES.get(c, c)
+                         for c in config.enabled_channels()) or "нет"
     print(f"мост «{config.name}»: слушаю {channels}; папка проектов {config.projects_dir}; "
           f"нейросеть {config.executor_model}, работ за раз {config.parallel}, "
           f"бюджет {config.timeout_sec // 60} мин", flush=True)
