@@ -82,6 +82,23 @@ NOT_A_FILE = {"ответ", "ответы", "сообщение", "сообще�
               "сводку", "сводка", "сводки"}
 HELP_RE = re.compile(r"^\s*(?:/?help|/start|помощь|что\s+ты\s+умеешь)\s*$", re.IGNORECASE)
 
+# Вежливость. Ловим только целую короткую реплику: «привет» — это мосту,
+# «привет, посчитай остатки» — это задание, и оно уходит нейросети целиком.
+POLITE_TAIL = r"[\s,.;:)\-—…?!]*$"
+GREETING_RE = re.compile(
+    r"^\s*(?:привет(?:ик|ствую)?|здравствуй(?:те)?|доброе\s+утро|добрый\s+день|"
+    r"добрый\s+вечер|доброй\s+ночи|добрый|хай|салют|здорово|приветик)"
+    + POLITE_TAIL, re.IGNORECASE)
+THANKS_RE = re.compile(r"^\s*(?:спасибо(?:\s+больш(?:ое|ущее))?|спасиб|спс|"
+                       r"благодарю|благодарствую)" + POLITE_TAIL, re.IGNORECASE)
+# «Да», «нет», «ага» сюда нарочно не взяты: это чаще всего ответ нейросети
+# на её же уточняющий вопрос, и съесть его мостом — значит оборвать разговор.
+SHORT_OK_RE = re.compile(r"^\s*(?:ок|окей|окей\s+спасибо|хорошо|понял|поняла|понятно|"
+                         r"ясно|принято|договорились|отлично)" + POLITE_TAIL, re.IGNORECASE)
+STILL_HERE_RE = re.compile(r"^\s*ты\s+(?:тут|здесь|на\s+месте|жива|живая|"
+                           r"работаешь|слышишь(?:\s+меня)?)" + POLITE_TAIL, re.IGNORECASE)
+# Один человек слышит длинное «вот что я умею» один раз на мессенджер.
+GREETED_KEY = "greeted:{channel}:{user_id}"
 
 # --- этап 5: расписание -----------------------------------------------------
 # Сама фраза «каждое утро в 7:30 …» разбирается в alarm.py; здесь — команды
@@ -243,6 +260,9 @@ class Router:
 
         if HELP_RE.match(text):
             return narrator.chunk(texts.HELP, limit)
+        polite = self._polite(incoming, text)
+        if polite is not None:
+            return narrator.chunk(polite, limit)
         if STOP_RE.match(text):
             return narrator.chunk(self._stop(incoming), limit)
         if NEW_SESSION_RE.search(text):
@@ -263,6 +283,30 @@ class Router:
             return narrator.chunk(self._switch(incoming, switch.group("name").strip()), limit)
 
         return self._work(incoming, text, limit)
+
+    # --- вежливость ---------------------------------------------------------
+
+    def _polite(self, incoming: Incoming, text: str) -> str | None:
+        """Короткая вежливая реплика — и ответ на неё. Иначе None.
+
+        Нейросеть за «привет» не будим: это пять секунд ожидания и деньги
+        подписки за строчку «Чем могу помочь». Первое «привет» после того, как
+        человека пустили, — единственное длинное: там мост коротко говорит,
+        что умеет, чтобы разговор не начинался с пустоты.
+        """
+        if GREETING_RE.match(text):
+            key = GREETED_KEY.format(channel=incoming.channel, user_id=incoming.user_id)
+            if not self.store.get_setting(key):
+                self.store.set_setting(key, "да")
+                return texts.GREETING_FIRST
+            return texts.GREETING
+        if THANKS_RE.match(text):
+            return texts.THANKS
+        if SHORT_OK_RE.match(text):
+            return texts.SHORT_OK
+        if STILL_HERE_RE.match(text):
+            return texts.STILL_HERE
+        return None
 
     # --- команды ------------------------------------------------------------
 

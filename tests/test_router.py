@@ -693,3 +693,61 @@ def test_the_summary_does_not_count_a_group(router, store):
     router.handle(group("привет всем"))
     assert store.strangers_since("2000-01-01T00:00:00+00:00") == []
 
+
+# --- вежливость (живая приёмка 15.09) ---------------------------------------
+
+def test_hello_is_answered_by_the_bridge_itself(router):
+    """Пять секунд ожидания и деньги подписки за «Чем могу помочь» — это перебор."""
+    answers = router.handle(tg("привет"))
+    assert answers and answers[0].strip()
+    assert router.executor.calls == []
+
+
+def test_the_first_hello_tells_what_the_bridge_can_do(router):
+    first = "\n".join(router.handle(tg("привет")))
+    assert len(first.splitlines()) >= 3
+    assert "помощь" in first.lower()
+
+
+def test_the_second_hello_is_one_line(router):
+    router.handle(tg("привет"))
+    second = "\n".join(router.handle(tg("здравствуйте")))
+    assert len(second.splitlines()) == 1
+    assert router.executor.calls == []
+
+
+def test_each_person_hears_the_long_hello_once(router):
+    router.handle(tg("привет"))
+    other = "\n".join(router.handle(mx("привет")))
+    assert len(other.splitlines()) >= 3
+
+
+@pytest.mark.parametrize("word", ["спасибо", "Спасибо большое", "спс", "благодарю",
+                                  "ок", "окей", "поняла", "ясно", "принято"])
+def test_short_polite_words_are_answered_without_the_executor(router, word):
+    answers = router.handle(tg(word))
+    assert answers and answers[0].strip()
+    assert router.executor.calls == []
+
+
+@pytest.mark.parametrize("word", ["ты тут?", "ты здесь", "ты на месте?", "ты живая?"])
+def test_are_you_there_is_answered_at_once(router, word):
+    answers = router.handle(tg(word))
+    assert answers and answers[0].strip()
+    assert router.executor.calls == []
+
+
+@pytest.mark.parametrize("text", ["привет, посчитай остатки",
+                                  "спасибо, а теперь посчитай остатки",
+                                  "ок, запусти проверку"])
+def test_a_greeting_with_a_task_still_goes_to_work(router, text):
+    router.handle(tg(text))
+    router.pool.wait_idle()
+    assert router.executor.calls, text
+
+
+def test_a_plain_yes_is_not_eaten_by_the_bridge(router):
+    """«Да» — это чаще всего ответ нейросети на её же вопрос, а не вежливость."""
+    router.handle(tg("да"))
+    router.pool.wait_idle()
+    assert router.executor.calls
