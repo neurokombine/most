@@ -1,0 +1,41 @@
+# Шаблонный юнит моста: один экземпляр на человека.
+#   sudo cp systemd/most@.service /etc/systemd/system/
+#   sudo systemctl enable --now most@anna
+# «anna» здесь — имя экземпляра: настройки берутся из ~/.most/anna/config.yaml,
+# база и журнал работ — оттуда же. Пользователь Linux при этом один и тот же:
+# мост запускается от того, кто его поставил (User= задаётся при установке),
+# а экземпляры разведены папками, а не учётными записями.
+
+[Unit]
+Description=Мост между мессенджером и вашей системой (экземпляр %i)
+After=network-online.target
+Wants=network-online.target
+# Сторож цикла респавна: если мост падает чаще пяти раз за пять минут,
+# systemd перестаёт его поднимать — иначе поломка крутится молча.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Подставьте своего пользователя и свой путь при установке:
+User=REPLACE_USER
+WorkingDirectory=/home/REPLACE_USER/most
+ExecStart=/home/REPLACE_USER/most/.venv/bin/python -m bridge --name %i
+Restart=on-failure
+RestartSec=10
+# Код 3 = «мой код на диске обновился». Это не падение: считаем выход успешным,
+# но всё равно поднимаем новую версию.
+SuccessExitStatus=3
+RestartForceExitStatus=3
+# Мост выходит с кодом 0, когда чинить надо руками (токен не признан, слушателя
+# перехватили): Restart=on-failure на нулевом коде не поднимает, и юнит не уходит
+# в вечный цикл перезапусков. Причина видна в journalctl -u most@%i.
+StandardOutput=journal
+StandardError=journal
+# Скромные рамки: у ученика по программе 4 ГБ.
+MemoryMax=1G
+TimeoutStopSec=30
+KillMode=mixed
+
+[Install]
+WantedBy=multi-user.target
