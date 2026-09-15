@@ -758,6 +758,8 @@ class Router:
             except Exception as exc:                # noqa: BLE001
                 self.store.note("error", channel=incoming.channel,
                                 text=self._mask(exc)[:200])
+                return texts.FILE_NOT_SENT_WHY.format(path=path,
+                                                      trouble=self._mask(exc)[:200])
             return texts.FILE_NOT_SENT.format(path=path)
 
         if receiver is None:
@@ -771,9 +773,12 @@ class Router:
                 limit=postman.human_size(too_big.limit or receiver.upload_limit),
                 path=path)
         except Exception as exc:                    # noqa: BLE001
+            # Причину пишем и в журнал, и человеку: живая приёмка 15.09 показала,
+            # что «не вышло» без причины нечего даже переслать за помощью.
             self.store.note("error", channel=incoming.channel, chat_id=incoming.chat_id,
                             text=self._mask(exc)[:200])
-            return texts.FILE_NOT_SENT.format(path=path)
+            return texts.FILE_NOT_SENT_WHY.format(path=path,
+                                                  trouble=self._mask(exc)[:200])
         return ""                                   # файл ушёл, подпись при нём
 
     # --- работа -------------------------------------------------------------

@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import mimetypes
 import time
 from pathlib import Path
 
@@ -44,6 +45,10 @@ NOT_READY = "attachment.not.ready"
 UPLOAD_SETTLE = 1.0                      # пауза после загрузки, до первой попытки
 NOT_READY_TRIES = 6
 NOT_READY_STEP = 2.0
+# Их файловый узел ищет в multipart именно файл, а не просто поле: части без
+# `Content-Type` он не видит вовсе и отвечает «There is no file in request»
+# (код `upload.error`). Вид не угадался по расширению — говорим «просто байты».
+DEFAULT_MIME = "application/octet-stream"
 
 _BUNDLE = Path(__file__).resolve().parent.parent.parent / "certs" / "max_ca_bundle.pem"
 CA_BUNDLE = str(_BUNDLE) if _BUNDLE.exists() else True
@@ -228,7 +233,10 @@ class MaxReceiver(Receiver):
         with open(path, "rb") as body:
             # Поле формы называется `data` — так в их примере и в рабочем коде;
             # токена в этот запрос не кладём, это уже не platform-api2.
-            resp = self.session.post(url, files={"data": (path.name, body)},
+            # Третий член — вид файла, и он обязателен: без него загрузка
+            # отвечает «в запросе нет файла» (живая приёмка 15.09).
+            resp = self.session.post(url,
+                                     files={"data": (path.name, body, mime_of(path))},
                                      verify=self.verify, timeout=FILE_TIMEOUT)
         data = _json_of(resp)
         if resp.status_code >= 400:
@@ -306,6 +314,16 @@ def _attachments(raw) -> list[Attachment]:
             raw=item,
         ))
     return found
+
+
+def mime_of(path) -> str:
+    """Вид файла для multipart: по расширению, а иначе — «просто байты».
+
+    Кириллица в имени этому не мешает: `mimetypes` смотрит на хвост после
+    точки, а имя целиком уезжает в заголовок части как есть, в UTF-8.
+    """
+    guessed, _ = mimetypes.guess_type(str(path))
+    return guessed or DEFAULT_MIME
 
 
 def _json_of(resp) -> dict:

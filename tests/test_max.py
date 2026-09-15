@@ -354,3 +354,35 @@ def test_the_name_of_the_sender_comes_along(store):
                      "body": {"text": "привет"}}}], "marker": 5})])
     got = MaxReceiver(token="t", store=store, session=session).poll_once()
     assert got[0].name == "Наталья"
+
+
+# --- вид файла в multipart (живая приёмка 15.09) ----------------------------
+
+def test_upload_names_the_kind_of_file(store, tmp_path):
+    """Max отказывает загрузке, у которой в multipart нет вида файла.
+
+    Живьём 15.09: без `Content-Type` у части формы их файловый узел отвечает
+    403 «There is no file in request» с кодом `upload.error` — файл он в запросе
+    просто не видит. Имя из трёх частей (имя, тело, вид) лечит это.
+    """
+    path = tmp_path / "отчёт-сентябрь.md"
+    path.write_bytes(b"data")
+    session = FakeSession(upload_responses())
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=lambda s: None)
+    r.send_file(900, path)
+
+    part = session.calls[1]["files"]["data"]
+    assert len(part) == 3, "у части формы должен быть третий член — вид файла"
+    assert part[0] == "отчёт-сентябрь.md"
+    assert part[2] == "text/markdown"
+
+
+def test_unknown_extension_still_gets_a_kind(store, tmp_path):
+    """Вид не угадался — говорим «просто байты», а не молчим."""
+    path = tmp_path / "выгрузка.огурец"
+    path.write_bytes(b"data")
+    session = FakeSession(upload_responses())
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=lambda s: None)
+    r.send_file(900, path)
+
+    assert session.calls[1]["files"]["data"][2] == "application/octet-stream"

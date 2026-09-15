@@ -585,6 +585,32 @@ def test_a_file_only_promised_is_not_remembered(router):
     assert "пришли" in "\n".join(later).lower()
 
 
+def test_the_failure_names_the_step_it_stumbled_on(router, config):
+    """«Не вышло» без причины нечего показать нейросети.
+
+    Живая приёмка 15.09: файл дважды не ушёл в Max, и в чате была только
+    строчка «отправить не вышло». Причина (`upload.error`) лежала в журнале,
+    а человек её не видел и позвать на помощь не мог.
+    """
+    make_file(router, "смета.pdf")
+    receiver = FakeReceiver()
+    receiver.send_file = _refuse(RuntimeError("не смог залить файл в Max: upload.error"))
+    answers = router.handle(tg("пришли мне смету"), receiver=receiver)
+
+    text = "\n".join(answers)
+    assert "upload.error" in text
+    assert "смета.pdf" in text
+
+
+def test_the_failure_reason_is_cleaned_of_the_token(router, store, config):
+    """Причину показываем человеку — значит, чистим её так же, как журнал."""
+    make_file(router, "смета.pdf")
+    receiver = FakeReceiver()
+    receiver.send_file = _refuse(RuntimeError(f"/bot{config.telegram.token}/sendDocument упал"))
+    answers = router.handle(tg("пришли мне смету"), receiver=receiver)
+    assert config.telegram.token not in "\n".join(answers)
+
+
 def test_the_token_never_reaches_the_journal(router, store, config):
     """Сеть любит вписать в ошибку полный адрес запроса, а в нём — токен."""
     make_file(router, "смета.pdf")
