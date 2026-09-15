@@ -3,25 +3,45 @@
 # Что делает: заводит .venv, ставит две зависимости, создаёт папку экземпляра
 # ~/.most/<имя>/ с заготовкой config.yaml (права 600) и папкой проектов.
 #
-# Запуск:  bash scripts/setup.sh                  # экземпляр «default»
-#          bash scripts/setup.sh anna             # экземпляр «anna»
-#          bash scripts/setup.sh --voice          # вместе с голосом
+# Запуск:  bash scripts/setup.sh                        # экземпляр «default»
+#          bash scripts/setup.sh anna                   # экземпляр «anna»
+#          bash scripts/setup.sh anna --projects ~/moi-proekty
+#          bash scripts/setup.sh anna --voice           # вместе с голосом
+#
+# «--projects» — папка, в которой лежат рабочие папки человека. Она у него уже
+# есть после переезда системы: мост ничего не переносит и ничего там не трогает,
+# он только знает, где искать.
 #
 # С «--voice» ставятся ещё две библиотеки и заранее скачиваются модели: слух
 # (~500 МБ) и голос (~63 МБ). Скачать их надо ИМЕННО сейчас, а не при первом
 # голосовом сообщении: иначе человек сидит перед молчащим ботом несколько минут.
+# На машине с 4 ГБ памяти голос впритык — по умолчанию он выключен.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NAME="default"
 WITH_VOICE=0
-for arg in "$@"; do
-  case "$arg" in
+PROJECTS=""
+while [ $# -gt 0 ]; do
+  case "$1" in
     --voice) WITH_VOICE=1 ;;
-    -*) echo "[установка] не знаю довода $arg — знаю только --voice"; exit 1 ;;
-    *) NAME="$arg" ;;
+    --projects)
+      shift
+      [ $# -gt 0 ] || { echo "[установка] после --projects нужен путь к папке с проектами"; exit 1; }
+      PROJECTS="$1" ;;
+    --projects=*) PROJECTS="${1#--projects=}" ;;
+    -*) echo "[установка] не знаю довода $1 — знаю только --voice и --projects <папка>"; exit 1 ;;
+    *) NAME="$1" ;;
   esac
+  shift
 done
+
+case "$NAME" in
+  *[!A-Za-z0-9_-]*)
+    echo "[установка] имя экземпляра «$NAME» не годится: только латиница, цифры, дефис"
+    echo "            имя попадает в имя службы most@<имя> и в путь ~/.most/<имя>"
+    exit 1 ;;
+esac
 
 HOME_DIR="${MOST_HOME:-$HOME/.most/${NAME}}"
 SHARED_DIR="$(dirname "$HOME_DIR")"           # модели общие для всех экземпляров
@@ -29,6 +49,13 @@ MODELS_DIR="$SHARED_DIR/models/faster-whisper"
 VOICES_DIR="$SHARED_DIR/voices"
 PIPER_VOICE="${MOST_PIPER_VOICE:-ru_RU-irina-medium}"
 WHISPER_MODEL="${MOST_WHISPER_MODEL:-small}"
+
+# Папка проектов: сказали — берём сказанное, не сказали — ~/projects.
+PROJECTS="${PROJECTS:-$HOME/projects}"
+case "$PROJECTS" in
+  "~") PROJECTS="$HOME" ;;
+  "~/"*) PROJECTS="$HOME/${PROJECTS#\~/}" ;;
+esac
 
 # 1. базовый python: нужен 3.10–3.13 (на 3.14 колёс ещё нет)
 pick_python() {
@@ -42,11 +69,20 @@ pick_python() {
 if [ ! -x .venv/bin/python ]; then
   BASE=$(pick_python || true)
   if [ -z "${BASE:-}" ]; then
-    echo "[установка] Не нашёл Python нужной версии. Поставьте Python 3.12 и запустите снова."
+    echo "[установка] Не нашёл Python нужной версии (нужен от 3.10 до 3.13)."
+    echo "            На Ubuntu:  sudo apt install -y python3 python3-venv"
     exit 1
   fi
   echo "[установка] беру $BASE ($($BASE --version 2>&1))"
-  "$BASE" -m venv .venv
+  if ! "$BASE" -m venv .venv; then
+    # Самая частая беда голой Ubuntu: сам python есть, а части для окружения нет.
+    echo "[установка] Отдельное окружение не создалось: у этого Python нет части venv."
+    echo "            На Ubuntu это лечится одной строкой:"
+    echo "                sudo apt install -y python3-venv"
+    echo "            После этого запустите установку снова — она продолжит с этого места."
+    rm -rf .venv
+    exit 1
+  fi
 fi
 
 echo "[установка] зависимости (их всего две)…"
@@ -55,7 +91,14 @@ echo "[установка] зависимости (их всего две)…"
 
 # 2. папка экземпляра
 mkdir -p "$HOME_DIR/jobs"
-mkdir -p "$HOME/projects"
+if [ ! -d "$PROJECTS" ]; then
+  mkdir -p "$PROJECTS"
+  echo "[установка] папки проектов не было — завёл пустую: $PROJECTS"
+  echo "            если ваши рабочие папки лежат в другом месте, поправьте"
+  echo "            строку projects_dir в $HOME_DIR/config.yaml"
+else
+  echo "[установка] папка проектов: $PROJECTS"
+fi
 
 if [ ! -f "$HOME_DIR/config.yaml" ]; then
   cat > "$HOME_DIR/config.yaml" <<YAML
@@ -71,7 +114,11 @@ max:
   token: ""          # токен от @MasterBot
   allowlist: []      # ваши Max user_id
 
-projects_dir: "$HOME/projects"
+# Папка, внутри которой лежат ваши рабочие папки. Мост в них работает,
+# но ничего туда не переносит.
+projects_dir: "$PROJECTS"
+
+timezone: "Europe/Moscow"   # время расписания и всех отметок
 
 voice:
   enabled: true           # слушать голосовые, если распознавание поставлено
@@ -86,11 +133,16 @@ executor:
   model: sonnet        # какой моделью работать: sonnet дешевле, opus умнее
   parallel: 1          # сколько задач вести одновременно; на 4 ГБ памяти — одна
   timeout_sec: 900     # бюджет времени на одну работу, 900 с = 15 минут
-  extra_args: []       # доводы для claude; см. README, раздел «Настройки»
+  # Не тянуть в работу личные расширения и шпаргалки: запуск дешевле и
+  # предсказуемее, CLAUDE.md самой рабочей папки при этом читается как обычно.
+  extra_args: ["--setting-sources", "project"]
 YAML
   echo "[установка] завёл настройки: $HOME_DIR/config.yaml"
 else
   echo "[установка] настройки уже есть: $HOME_DIR/config.yaml — не трогаю"
+  if ! grep -q "projects_dir:.*$PROJECTS" "$HOME_DIR/config.yaml" 2>/dev/null; then
+    echo "            папка проектов в них своя; если нужна «$PROJECTS» — поправьте строку projects_dir"
+  fi
 fi
 
 chmod 700 "$HOME_DIR"
@@ -136,11 +188,12 @@ fi
 
 echo
 echo "Готово. Дальше:"
-echo "  1. впишите токен и свой id в $HOME_DIR/config.yaml"
-echo "  2. проверьте:  .venv/bin/python scripts/selftest.py --name $NAME"
-echo "  3. запустите:  .venv/bin/python -m bridge --name $NAME"
+echo "  1. впишите токены в $HOME_DIR/config.yaml (список своих оставьте пустым)"
+echo "  2. проверьте:  .venv/bin/python -m bridge --name $NAME doctor"
+echo "  3. автозапуск: sudo bash scripts/install-service.sh $NAME"
 if [ "$WITH_VOICE" != "1" ]; then
   echo
   echo "Голос (расшифровка голосовых и ответ вслух) ставится отдельно:"
   echo "  bash scripts/setup.sh $NAME --voice"
+  echo "  На машине с 4 ГБ памяти он впритык: слух занимает до 800 МБ."
 fi

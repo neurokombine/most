@@ -1,13 +1,22 @@
 # Шаблонный юнит моста: один экземпляр на человека.
-#   sudo cp systemd/most@.service /etc/systemd/system/
-#   sudo systemctl enable --now most@anna
-# «anna» здесь — имя экземпляра: настройки берутся из ~/.most/anna/config.yaml,
-# база и журнал работ — оттуда же. Пользователь Linux при этом один и тот же:
-# мост запускается от того, кто его поставил (User= задаётся при установке),
-# а экземпляры разведены папками, а не учётными записями.
+#
+# Ставится одной строкой — и это единственное место, где нужен sudo:
+#   sudo bash scripts/install-service.sh anna
+#
+# «anna» здесь — имя экземпляра (`%i`): настройки берутся из
+# ~/.most/anna/config.yaml, база и журнал работ — оттуда же. Пользователь Linux
+# при этом один и тот же: мост запускается от того, кто его поставил, а
+# экземпляры разведены папками, а не учётными записями.
+#
+# Почему в путях не стоит %h. Для системной службы %h — это домашняя папка того,
+# от кого запущен сам менеджер служб, то есть /root; строка User= на это не
+# влияет (systemd.unit(5)). Поэтому настоящий путь подставляет установщик:
+# он заменяет REPLACE_USER и REPLACE_HOME на живые значения. Руками этот файл
+# копировать не надо — с подстановками он не заработает.
 
 [Unit]
 Description=Мост между мессенджером и вашей системой (экземпляр %i)
+Documentation=file:REPLACE_HOME/most/README.md
 After=network-online.target
 Wants=network-online.target
 # Сторож цикла респавна: если мост падает чаще пяти раз за пять минут,
@@ -17,10 +26,12 @@ StartLimitBurst=5
 
 [Service]
 Type=simple
-# Подставьте своего пользователя и свой путь при установке:
 User=REPLACE_USER
-WorkingDirectory=/home/REPLACE_USER/most
-ExecStart=/home/REPLACE_USER/most/.venv/bin/python -m bridge --name %i
+WorkingDirectory=REPLACE_HOME/most
+ExecStart=REPLACE_HOME/most/.venv/bin/python -m bridge --name %i
+# Без этого строки моста копятся в буфере и в journalctl приходят пачкой —
+# а смотрят туда как раз тогда, когда надо видеть происходящее сейчас.
+Environment=PYTHONUNBUFFERED=1
 Restart=on-failure
 RestartSec=10
 # Код 3 = «мой код на диске обновился». Это не падение: считаем выход успешным,
@@ -32,8 +43,15 @@ RestartForceExitStatus=3
 # в вечный цикл перезапусков. Причина видна в journalctl -u most@%i.
 StandardOutput=journal
 StandardError=journal
-# Скромные рамки: у ученика по программе 4 ГБ.
-MemoryMax=1G
+# Рамки по памяти считаны под машину из программы: 4 ГБ.
+# Что в них должно поместиться: сам мост (~80 МБ) · нейросеть на время работы
+# (~300 МБ, пик замера этапа 0) · расшифровка голосового (до 800–970 МБ, замер
+# этапа 4). Итого с голосом около 1,4 ГБ — поэтому 1 ГБ, стоявший здесь раньше,
+# гасил бы мост посреди первого же голосового.
+# MemoryHigh придавливает мягко, MemoryMax — предел, за которым ядро убивает.
+# Между MemoryMax и 4 ГБ остаётся запас самой машине.
+MemoryHigh=1800M
+MemoryMax=2560M
 TimeoutStopSec=30
 KillMode=mixed
 
