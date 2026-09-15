@@ -130,6 +130,35 @@ class WorkPool:
         work.handle.cancel()
         return work
 
+    def stop_in_dir(self, workdir, skip: Key | None = None) -> list[Work]:
+        """Гасит всё, что идёт в этой папке, — своё и заведённое расписанием.
+
+        Находка этапа 2: «стоп» гасил только работу своей связки, а работа
+        будильника шла в той же папке под своим ключом и оставалась жить.
+        Человек видит одну папку, а не ключи связок, — значит, и останавливать
+        надо по папке.
+        """
+        try:
+            target = Path(workdir).resolve()
+        except OSError:
+            target = Path(workdir)
+        stopped: list[Work] = []
+        with self._lock:
+            running = list(self._running.items())
+        for key, work in running:
+            if skip is not None and key == skip:
+                continue
+            try:
+                here = work.workdir.resolve()
+            except OSError:
+                here = work.workdir
+            if here != target:
+                continue
+            work.stop_asked = True
+            work.handle.cancel()
+            stopped.append(work)
+        return stopped
+
     def stop_all(self) -> None:
         for key in list(self._running):
             self.stop(key)

@@ -18,10 +18,12 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
-from . import texts
+from . import changes, texts
 
 try:                                       # на голой системе tzdata может не быть
     from zoneinfo import ZoneInfo
@@ -30,6 +32,16 @@ except ImportError:                        # pragma: no cover
 
 MOSCOW_NAME = "Europe/Moscow"
 MOSCOW_FALLBACK = timezone(timedelta(hours=3))
+
+# Мост был выключен дольше — догонять кучей не будем: шесть работ подряд
+# в девять утра съедят подписку и завалят чат. Одна строка в журнал и в сводку.
+MISSED_AFTER = 6 * 3600
+LATE_GRACE = 300          # опоздание меньше пяти минут — обычный ход, молчим
+SUMMARY_KEY = "summary_sent_on"       # маркер «сводка за эти сутки уже ушла»
+DAY = 24 * 3600
+RESULT_LIMIT = 500        # первые пятьсот знаков итога — в отчёт
+FILES_IN_REPORT = 5
+PROMPT_HEAD = 60
 
 DAILY = "daily"
 WEEKDAYS = "weekdays"
@@ -339,3 +351,290 @@ def _without(raw: str, spans) -> str:
         for index in range(start, min(end, len(letters))):
             letters[index] = " "
     return " ".join("".join(letters).split()).strip(" ,;:.—–-")
+
+
+def how_long(seconds) -> str:
+    """Сколько длилась работа — словами, а не в секундах с точкой."""
+    try:
+        seconds = int(round(float(seconds)))
+    except (TypeError, ValueError):
+        return "сколько шла — не знаю"
+    if seconds < 60:
+        return f"{seconds} с"
+    minutes, rest = divmod(seconds, 60)
+    return f"{minutes} мин {rest} с" if rest else f"{minutes} мин"
+
+
+def plural(count: int, forms: tuple[str, str, str]) -> str:
+    """«1 раз», «2 раза», «5 раз» — чтобы мост не писал «5 раз(а)»."""
+    count = abs(int(count))
+    if count % 10 == 1 and count % 100 != 11:
+        return forms[0]
+    if 2 <= count % 10 <= 4 and not 12 <= count % 100 <= 14:
+        return forms[1]
+    return forms[2]
+
+
+def money(amount: float) -> str:
+    return f"{amount:.2f}".replace(".", ",") + " $"
+
+
+def _short(text: str, limit: int = PROMPT_HEAD) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[:limit].rstrip() + "…"
+
+
+class Scheduler:
+    """Будильник моста: смотрит на часы, ставит работы и обязательно отчитывается.
+
+    Своей очереди у него нет: работа уходит в тот же `WorkPool`, что и разговор
+    в чате. Иначе в одной папке окажутся две нейросети сразу, а слово «стоп»
+    будет останавливать только одну из них.
+
+    Отчёт после каждого прогона — не вежливость, а условие: тишина ответом
+    не считается. Поэтому и уходит он во все настроенные мессенджеры разом
+    (`Bridge.broadcast`), а не только в тот чат, где задачу однажды завели.
+    """
+
+    def __init__(self, config, store, pool, postbox=None, clock=None):
+        self.config = config
+        self.store = store
+        self.pool = pool
+        self.postbox = postbox
+        self.tz = zone(getattr(config, "timezone", None))
+        self.every = int(getattr(getattr(config, "schedule", None), "tick_sec", 30) or 30)
+        self._clock = clock
+        self._last_look = 0.0
+        self.looks = 0                    # сколько раз смотрели на часы (для тестов)
+
+    # --- часы ---------------------------------------------------------------
+
+    def now(self) -> datetime:
+        moment = self._clock() if self._clock is not None else datetime.now(self.tz)
+        return moment.astimezone(self.tz)
+
+    def projects_dir(self) -> Path:
+        return Path(self.config.projects_dir)
+
+    def workdir_of(self, row) -> Path:
+        """Папка задачи — та, в которой её задали, даже если чат давно переключили."""
+        project = row["project"]
+        if not project:
+            link = self.store.get_link_by_id(row["link_id"])
+            project = link["project"] if link else None
+        return self.projects_dir() / (project or "")
+
+    # --- один взгляд на часы -------------------------------------------------
+
+    def tick(self, now: datetime | None = None) -> int:
+        """Заход будильника. Зовётся из главного цикла — не чаще, чем раз в `tick_sec`."""
+        if now is None:
+            if time.monotonic() - self._last_look < self.every:
+                return 0
+            self._last_look = time.monotonic()
+            self.looks += 1
+            now = self.now()
+        else:
+            now = now.astimezone(self.tz)
+        return self.run_due(now) + self.maybe_summary(now)
+
+    # --- поставить задачу ----------------------------------------------------
+
+    def add(self, link, spec: Spec, prompt: str, project: str | None = None):
+        project = project or link["project"]
+        task_id = self.store.add_schedule(
+            link_id=link["id"], spec=spec.to_stored(), prompt=prompt, project=project,
+            next_run_at=to_iso(next_run(spec, self.now(), self.tz)))
+        return self.store.get_schedule(task_id)
+
+    # --- кому пора ------------------------------------------------------------
+
+    def run_due(self, now: datetime) -> int:
+        started = 0
+        for row in self.store.list_schedule(only_enabled=True):
+            spec = Spec.stored(row["spec"])
+            if spec is None:
+                # Строка в базе испорчена: молча запускать непонятно что нельзя.
+                self.store.note("error", text=f"расписание задачи {row['id']} не читается")
+                self.store.enable_schedule(row["id"], False)
+                continue
+
+            due = from_iso(row["next_run_at"], self.tz) if row["next_run_at"] else None
+            if due is None:
+                self.store.set_schedule_next(row["id"], to_iso(next_run(spec, now, self.tz)))
+                continue
+            if due > now:
+                continue
+
+            late = (now - due).total_seconds()
+            if late > MISSED_AFTER:
+                self._missed(row, spec, now)
+                continue
+            if self.launch(row, spec=spec, now=now) is None:
+                continue                  # руки заняты — вернёмся через полминуты
+            if late > LATE_GRACE:
+                self._say(texts.SCHEDULE_LATE.format(
+                    number=row["id"], when=clock_face(spec.hour, spec.minute)))
+            started += 1
+        return started
+
+    def launch(self, row, spec: Spec | None = None, now: datetime | None = None,
+               move_next: bool = True):
+        """Ставит работу расписания в общую очередь. None — места сейчас нет."""
+        now = now or self.now()
+        spec = spec or Spec.stored(row["spec"])
+        link = self.store.get_link_by_id(row["link_id"])
+        if link is None:
+            self.store.note("error", text=f"задача {row['id']}: чат, где её завели, пропал")
+            self.store.enable_schedule(row["id"], False)
+            return None
+
+        work = self.pool.submit(link=link, channel=link["channel"],
+                                chat_id=link["chat_id"], thread_id=link["thread_id"],
+                                prompt=row["prompt"], workdir=self.workdir_of(row),
+                                resume=bool(link["session_started"]))
+        if work is None:
+            return None
+
+        work.meta["schedule_id"] = row["id"]
+        work.meta["schedule_prompt"] = row["prompt"]
+        self.store.set_job_schedule(work.job_id, row["id"])
+        self.store.mark_schedule_run(
+            row["id"], status="running", at=to_iso(now),
+            next_run_at=to_iso(next_run(spec, now, self.tz)) if (spec and move_next) else None)
+        return work
+
+    def _missed(self, row, spec: Spec, now: datetime) -> None:
+        """Проспали больше шести часов: записываем и ждём следующего раза."""
+        text = texts.SCHEDULE_MISSED.format(number=row["id"],
+                                            when=clock_face(spec.hour, spec.minute))
+        self.store.note("missed", text=text)
+        self.store.mark_schedule_run(row["id"], status="missed", at=to_iso(now),
+                                     next_run_at=to_iso(next_run(spec, now, self.tz)))
+
+    # --- обязательный отчёт ---------------------------------------------------
+
+    def report(self, work) -> str:
+        """Что сказать про доделанную работу расписания. Зовёт главный цикл."""
+        meta = work.meta or {}
+        number = meta.get("schedule_id", "?")
+        head = _short(meta.get("schedule_prompt") or work.prompt)
+        result = work.result
+
+        if result is None:
+            return texts.SCHEDULE_REPORT_FAILED.format(
+                number=number, prompt=head, error=texts.WORK_EMPTY_ANSWER)
+        if result.stopped:
+            return texts.SCHEDULE_REPORT_STOPPED.format(number=number, prompt=head)
+        if result.timed_out:
+            return texts.SCHEDULE_REPORT_TIMEOUT.format(
+                number=number, prompt=head,
+                budget=how_long(getattr(self.pool.executor, "timeout", 900)))
+        if not result.ok:
+            return texts.SCHEDULE_REPORT_FAILED.format(
+                number=number, prompt=head,
+                error=_short(result.error or "работа завершилась неудачно", 300))
+
+        lines = [texts.SCHEDULE_REPORT_OK.format(
+            number=number, prompt=head, how_long=self._how_long_of(work),
+            result=_short(result.text or texts.WORK_EMPTY_ANSWER, RESULT_LIMIT))]
+        files = self._files_of(work)
+        if files:
+            lines.append(texts.SCHEDULE_REPORT_FILES.format(files=", ".join(files)))
+        return "\n".join(lines)
+
+    def _how_long_of(self, work) -> str:
+        row = self.store.get_job(work.job_id)
+        seconds = row["duration_sec"] if row is not None else None
+        if seconds is None:
+            seconds = getattr(work.result, "duration_sec", None)
+        return how_long(seconds)
+
+    def _files_of(self, work) -> list[str]:
+        """Файлы смотрим сами, а не по словам нейросети: отчёт — это не результат."""
+        try:
+            found = changes.changed_files(work.workdir, since=work.started_wall,
+                                          limit=FILES_IN_REPORT)
+        except Exception:                               # noqa: BLE001
+            return []
+        return [name for name, _mtime in found]
+
+    # --- ежедневная сводка ----------------------------------------------------
+
+    def maybe_summary(self, now: datetime) -> int:
+        settings = getattr(self.config, "schedule", None)
+        if settings is not None and not getattr(settings, "summary", True):
+            return 0
+
+        hour, minute = _hhmm(getattr(settings, "summary_at", "08:00") or "08:00")
+        today = now.date().isoformat()
+        marker = self.store.get_setting(SUMMARY_KEY)
+        if marker == today or (now.hour, now.minute) < (hour, minute):
+            return 0
+        if marker is None:
+            # Первое утро после установки: суток за спиной ещё нет, считать нечего.
+            self.store.set_setting(SUMMARY_KEY, today)
+            return 0
+        if not self._say(self.summary_text(now)):
+            return 0                     # сказать было некому — скажем, когда будет
+        self.store.set_setting(SUMMARY_KEY, today)
+        return 1
+
+    def summary_text(self, now: datetime) -> str:
+        since = to_iso(now - timedelta(seconds=DAY))
+        lines = [texts.SUMMARY_HEADER.format(at=when_text(now, self.tz)), ""]
+        lines += self._runs_lines(since) or [texts.SUMMARY_NOTHING]
+        lines += self._missed_lines(since)
+
+        spent, known = self.store.spent_since(since)
+        lines.append("")
+        lines.append(texts.SUMMARY_COST.format(cost=money(spent)) if known
+                     else texts.SUMMARY_COST_UNKNOWN)
+
+        strangers = self.store.strangers_since(since)
+        if strangers:
+            who = ", ".join(sorted({f"id {row['user_id']} ({row['channel']})"
+                                    for row in strangers}))
+            lines.append(texts.SUMMARY_STRANGERS.format(
+                count=len(strangers), times=plural(len(strangers), ("раз", "раза", "раз")),
+                who=who))
+        else:
+            lines.append(texts.SUMMARY_NO_STRANGERS)
+        return "\n".join(lines)
+
+    def night_text(self, now: datetime | None = None) -> str:
+        """«Покажи, что ты запускала ночью и чем закончилось» — дверь, а не отчёт."""
+        now = now or self.now()
+        since = to_iso(now - timedelta(seconds=DAY))
+        runs = self._runs_lines(since)
+        missed = self._missed_lines(since)
+        if not runs and not missed:
+            return texts.NIGHT_EMPTY
+        return "\n".join([texts.NIGHT_HEADER] + runs + missed)
+
+    def _runs_lines(self, since: str) -> list[str]:
+        lines = []
+        for row in self.store.jobs_since(since, only_scheduled=True):
+            when = from_iso(row["started_at"], self.tz)
+            lines.append(texts.NIGHT_LINE.format(
+                at=when.strftime("%d.%m %H:%M") if when else row["started_at"],
+                number=row["schedule_id"],
+                outcome=texts.JOB_OUTCOME.get(row["state"], row["state"]),
+                how_long=how_long(row["duration_sec"]),
+                prompt=_short(row["prompt_head"] or "")))
+        return lines
+
+    def _missed_lines(self, since: str) -> list[str]:
+        return [texts.NIGHT_MISSED_LINE.format(text=row["text"])
+                for row in self.store.journal_since("missed", since)]
+
+    # --- сказать во все каналы -------------------------------------------------
+
+    def _say(self, text: str, aloud: bool = True) -> int:
+        if not text or self.postbox is None:
+            return 0
+        try:
+            return int(self.postbox.broadcast(text, aloud=aloud) or 0)
+        except Exception as exc:                        # noqa: BLE001
+            self.store.note("error", text=f"не смог отчитаться о расписании: {exc}"[:200])
+            return 0
