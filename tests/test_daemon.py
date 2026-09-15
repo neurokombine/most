@@ -197,3 +197,81 @@ def test_recovery_happens_on_start_of_the_loop(config, store):
                receivers={"telegram": tg}, sleeper=lambda s: None)
     b.run(max_ticks=1)
     assert any("прервали" in text for _, text in tg.sent)
+
+
+# --- этап 3: во все настроенные каналы разом --------------------------------
+
+def test_broadcast_reaches_both_messengers(bridge):
+    bridge.tick()                       # оба чата знакомы мосту
+    drain(bridge)
+    delivered = bridge.broadcast("сводка за сегодня")
+    assert delivered == 2
+    assert bridge.receivers["telegram"].sent[-1] == (500, "сводка за сегодня")
+    assert bridge.receivers["max"].sent[-1] == (900, "сводка за сегодня")
+
+
+def test_broadcast_with_a_file_sends_the_file(bridge, tmp_path):
+    path = tmp_path / "сводка.txt"
+    path.write_text("итоги", encoding="utf-8")
+    bridge.tick()
+    drain(bridge)
+    for receiver in bridge.receivers.values():
+        receiver.files = []
+        receiver.send_file = (lambda r: lambda chat_id, p, caption="":
+                              r.files.append((chat_id, p, caption)))(receiver)
+
+    assert bridge.broadcast("вот она", file=path) == 2
+    assert bridge.receivers["telegram"].files[0][0] == 500
+    assert bridge.receivers["max"].files[0][2] == "вот она"
+
+
+def test_broadcast_without_a_single_chat_still_finds_telegram_by_allowlist(config, store):
+    store.sync_allowlist("telegram", [111])
+    tg = FakeReceiver("telegram")
+    b = Bridge(config=config, store=store, executor=FakeExecutor(),
+               receivers={"telegram": tg}, sleeper=lambda s: None)
+    assert b.broadcast("сводка") == 1
+    assert tg.sent[0] == (111, "сводка")        # в личке chat_id и есть ваш id
+
+
+def test_broadcast_takes_the_freshest_chat_of_a_channel(bridge):
+    bridge.tick()
+    drain(bridge)
+    bridge.router.handle(msg("telegram", chat_id=777))      # свежая связка
+    bridge.pool.wait_idle()
+    bridge.deliver()
+    bridge.receivers["telegram"].sent = []
+    bridge.broadcast("сводка")
+    assert [chat for chat, _ in bridge.receivers["telegram"].sent] == [777]
+
+
+def test_a_dead_channel_does_not_stop_the_others(bridge):
+    bridge.tick()
+    drain(bridge)
+
+    def refuse(chat_id, text):
+        raise RuntimeError("канал лёг")
+
+    bridge.receivers["telegram"].send = refuse
+    assert bridge.broadcast("сводка") == 1              # Max получил
+    assert store_has_error(bridge.store)
+
+
+def store_has_error(store):
+    return any(row["kind"] == "error" for row in store.recent_journal())
+
+
+def test_incoming_file_reaches_the_router_with_its_receiver(bridge, tmp_path):
+    from bridge.receivers.base import Attachment
+
+    project = next(p for p in bridge.config.projects_dir.iterdir() if p.is_dir())
+    tg = bridge.receivers["telegram"]
+    tg.batches = [[Incoming(channel="telegram", chat_id=500, user_id=111, text="",
+                            thread_id=0, raw={},
+                            attachments=[Attachment(kind="file", file_id="f",
+                                                    file_name="акт.pdf", size=4)])]]
+    tg.fetch = lambda attachment: b"body"
+    bridge.tick()
+    drain(bridge)
+    assert (project / "входящие" / "акт.pdf").exists()
+    assert "входящие" in "\n".join(text for _, text in tg.sent)

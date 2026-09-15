@@ -23,7 +23,8 @@ from pathlib import Path
 import requests
 
 from . import narrator, texts
-from .receivers.base import BridgeConflict, RateLimited, TokenRejected, mask
+from .receivers.base import (BridgeConflict, FileTooBig, RateLimited,
+                             TokenRejected, mask)
 from .router import Router
 from .works import WorkPool
 
@@ -48,7 +49,10 @@ class Bridge:
         self.pool = pool or WorkPool(executor=executor, store=store,
                                      max_parallel=getattr(config, "parallel", 1))
         self.router = router or Router(config=config, store=store, executor=executor,
-                                       pool=self.pool)
+                                       pool=self.pool, postbox=self)
+        # Роутеру нужен почтовый ящик, чтобы «отдай» ушло во все мессенджеры.
+        if getattr(self.router, "postbox", None) is None:
+            self.router.postbox = self
         self._fingerprint = _code_fingerprint()
 
     # --- состояние ----------------------------------------------------------
@@ -131,6 +135,59 @@ class Bridge:
             delivered += 1
         return delivered
 
+    # --- сказать во все каналы разом ----------------------------------------
+
+    def broadcast(self, text: str, file=None) -> int:
+        """То, что мост присылает сам, уходит во все настроенные мессенджеры.
+
+        Правило про два входа целиком: спросили в одном — ответ там же, а что
+        мост шлёт по своему почину (сводка, «отдай») — в оба. В каждом канале
+        адресат один: самый свежий чат, а не все, где человек здоровался.
+
+        Один упавший канал не отменяет остальные: беду пишем в журнал и идём
+        дальше. Возвращаем, до скольких чатов дошло.
+        """
+        delivered = 0
+        too_big = None
+        for channel, receiver in self.receivers.items():
+            chat_id = self._broadcast_chat(channel)
+            if chat_id is None:
+                continue
+            try:
+                if file is not None:
+                    receiver.send_file(chat_id, file, caption=text or "")
+                else:
+                    for piece in narrator.chunk(text, getattr(receiver, "limit",
+                                                              narrator.TELEGRAM_LIMIT)):
+                        receiver.send(chat_id, piece)
+                delivered += 1
+            except FileTooBig as exc:
+                too_big = exc
+                self.store.note("error", channel=channel, chat_id=chat_id,
+                                text=f"файл не прошёл по размеру: {exc}"[:200])
+            except Exception as exc:                        # noqa: BLE001
+                self.store.note("error", channel=channel, chat_id=chat_id,
+                                text=self._mask(f"не смог сказать во все каналы: {exc}")[:200])
+        if not delivered and too_big is not None:
+            # Ни один канал файла не взял по размеру — пусть наверху скажут об этом
+            # человеку числами, а не общим «не вышло».
+            raise too_big
+        return delivered
+
+    def _broadcast_chat(self, channel: str):
+        """Куда говорить в этом канале: свежий чат, а если его нет — по списку своих.
+
+        Запасной ход работает только для Telegram: там в личке номер чата и есть
+        ваш id. У Max это разные числа, и угадывать их мост не станет.
+        """
+        link = self.store.newest_link_of(channel)
+        if link is not None:
+            return link["chat_id"]
+        if channel != "telegram":
+            return None
+        allowed = getattr(self.config.channel(channel), "allowlist", None) or []
+        return allowed[0] if allowed else None
+
     # --- после перезагрузки -------------------------------------------------
 
     def recover(self) -> int:
@@ -159,7 +216,8 @@ class Bridge:
 
     def _answer(self, receiver, message) -> None:
         try:
-            answers = self.router.handle(message)
+            # Приёмник передаём внутрь: файл скачать и отправить умеет только он.
+            answers = self.router.handle(message, receiver=receiver)
         except Exception as exc:                                # noqa: BLE001
             # Одно сообщение не должно ронять мост, и человек не должен видеть трассировку.
             self.store.note("error", channel=message.channel, chat_id=message.chat_id,

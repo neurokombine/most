@@ -269,6 +269,17 @@ class Store:
     def list_links(self):
         return self.db.execute("SELECT * FROM links ORDER BY id").fetchall()
 
+    def newest_link_of(self, channel: str):
+        """Самый свежий чат канала: туда мост говорит то, что говорит сам.
+
+        Сводка и «отдай» уходят во все настроенные мессенджеры, но в каждом —
+        в один чат, а не во все, где человек когда-либо здоровался.
+        """
+        return self.db.execute(
+            "SELECT * FROM links WHERE channel=? "
+            "ORDER BY COALESCE(last_job_at, created_at) DESC, id DESC LIMIT 1",
+            (channel,)).fetchone()
+
     # --- белый список -------------------------------------------------------
 
     def sync_allowlist(self, channel: str, user_ids: list[int]) -> None:
