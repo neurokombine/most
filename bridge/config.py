@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from . import texts
+from . import texts, voice
 
 DEFAULT_ROOT = Path.home() / ".most"
 DEFAULT_TIMEOUT_SEC = 900      # бюджет времени на одну работу — 15 минут
@@ -39,6 +39,26 @@ class ChannelConfig:
 
 
 @dataclass
+class VoiceConfig:
+    """Голос: слушать ли записи и читать ли ответы вслух.
+
+    Модели лежат рядом с экземплярами, а не внутри каждого: полгигабайта на
+    человека — расточительство, а голос у всех один и тот же.
+    """
+
+    enabled: bool = True                       # слушать голосовые, если есть чем
+    reply: bool = False                        # читать вслух сводки; по просьбе — всегда
+    model: str = voice.DEFAULT_MODEL
+    compute_type: str = voice.DEFAULT_COMPUTE
+    language: str = voice.DEFAULT_LANGUAGE
+    piper_voice: str = voice.DEFAULT_PIPER_VOICE
+    max_seconds: int = voice.MAX_SECONDS
+    max_chars: int = voice.MAX_SPEAK_CHARS
+    model_dir: Path = field(default_factory=lambda: DEFAULT_ROOT / "models" / "faster-whisper")
+    voices_dir: Path = field(default_factory=lambda: DEFAULT_ROOT / "voices")
+
+
+@dataclass
 class Config:
     name: str
     home: Path
@@ -51,6 +71,7 @@ class Config:
     executor_model: str = DEFAULT_MODEL
     executor_extra_args: list[str] = field(default_factory=list)
     parallel: int = DEFAULT_PARALLEL
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
 
     # --- производные пути ---------------------------------------------------
 
@@ -102,6 +123,29 @@ def _channel(raw: dict | None) -> ChannelConfig | None:
         except (TypeError, ValueError):
             continue
     return ChannelConfig(token=token, allowlist=allowlist)
+
+
+def _voice(raw, home: Path) -> VoiceConfig:
+    """Раздел voice. Нет раздела — значит, всё по умолчанию: слушаем, вслух молчим."""
+    shared = home.parent if home.parent != home else DEFAULT_ROOT
+    settings = VoiceConfig(model_dir=shared / "models" / "faster-whisper",
+                           voices_dir=shared / "voices")
+    if not isinstance(raw, dict):
+        return settings
+
+    settings.enabled = bool(raw.get("enabled", True))
+    settings.reply = bool(raw.get("reply", False))
+    settings.model = str(raw.get("model") or settings.model)
+    settings.compute_type = str(raw.get("compute_type") or settings.compute_type)
+    settings.language = str(raw.get("language") or settings.language)
+    settings.piper_voice = str(raw.get("piper_voice") or settings.piper_voice)
+    settings.max_seconds = _int(raw.get("max_seconds"), voice.MAX_SECONDS, least=5)
+    settings.max_chars = _int(raw.get("max_chars"), voice.MAX_SPEAK_CHARS, least=50)
+    for key in ("model_dir", "voices_dir"):
+        value = raw.get(key)
+        if value:
+            setattr(settings, key, Path(os.path.expanduser(str(value))))
+    return settings
 
 
 def _int(value, default: int, least: int = 1) -> int:
@@ -160,4 +204,5 @@ def load_config(home: Path | None = None, name: str = "default",
         executor_model=model,
         executor_extra_args=extra,
         parallel=parallel,
+        voice=_voice(raw.get("voice"), home),
     )

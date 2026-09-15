@@ -160,3 +160,78 @@ executor:
 """)
     cfg = load_config(home=home, name="test")
     assert cfg.parallel == 1
+
+
+# --- голос ------------------------------------------------------------------
+
+def test_voice_settings_have_sane_defaults(home, projects_dir):
+    write(home / "config.yaml", f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+""")
+    cfg = load_config(home=home, name="test")
+    assert cfg.voice.enabled is True
+    assert cfg.voice.model == "small"
+    assert cfg.voice.reply is False              # голосом наружу — только по просьбе
+    assert cfg.voice.max_seconds == 180
+    assert cfg.voice.max_chars == 1500
+    assert cfg.voice.piper_voice.startswith("ru_RU-")
+    # модели общие для всех экземпляров: 500 МБ на каждого — расточительство
+    assert cfg.voice.model_dir == home.parent / "models" / "faster-whisper"
+    assert cfg.voice.voices_dir == home.parent / "voices"
+
+
+def test_voice_section_is_read(home, projects_dir):
+    write(home / "config.yaml", f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+voice:
+  enabled: true
+  model: base
+  reply: true
+  piper_voice: ru_RU-dmitri-medium
+  max_seconds: 120
+  max_chars: 900
+  model_dir: "{projects_dir}/models"
+  voices_dir: "{projects_dir}/voices"
+""")
+    cfg = load_config(home=home, name="test")
+    assert cfg.voice.model == "base"
+    assert cfg.voice.reply is True
+    assert cfg.voice.piper_voice == "ru_RU-dmitri-medium"
+    assert cfg.voice.max_seconds == 120
+    assert cfg.voice.max_chars == 900
+    assert cfg.voice.model_dir == projects_dir / "models"
+    assert cfg.voice.voices_dir == projects_dir / "voices"
+
+
+def test_voice_can_be_switched_off(home, projects_dir):
+    write(home / "config.yaml", f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+voice:
+  enabled: false
+""")
+    cfg = load_config(home=home, name="test")
+    assert cfg.voice.enabled is False
+
+
+def test_nonsense_voice_limits_do_not_break_the_bridge(home, projects_dir):
+    write(home / "config.yaml", f"""
+telegram:
+  token: "abc:123"
+  allowlist: [111]
+projects_dir: "{projects_dir}"
+voice:
+  max_seconds: "три минуты"
+  max_chars: null
+""")
+    cfg = load_config(home=home, name="test")
+    assert cfg.voice.max_seconds == 180
+    assert cfg.voice.max_chars == 1500
