@@ -14,6 +14,7 @@
 """
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import requests
@@ -25,6 +26,7 @@ BASE = "https://platform-api2.max.ru"
 LONG_POLL_TIMEOUT = 25
 MARKER_KEY = "max_marker"
 MESSAGE_UPDATES = ("message_created", "comment_created")
+SEND_PAUSE = 0.6        # два сообщения в секунду в один чат — предел Max
 
 _BUNDLE = Path(__file__).resolve().parent.parent.parent / "certs" / "max_ca_bundle.pem"
 CA_BUNDLE = str(_BUNDLE) if _BUNDLE.exists() else True
@@ -35,12 +37,13 @@ class MaxReceiver(Receiver):
     limit = MAX_LIMIT
 
     def __init__(self, token: str, store, session=None, long_poll_timeout: int = LONG_POLL_TIMEOUT,
-                 verify=CA_BUNDLE):
+                 verify=CA_BUNDLE, sleeper=time.sleep):
         self.token = token
         self.store = store
         self.session = session or requests.Session()
         self.long_poll_timeout = long_poll_timeout
         self.verify = verify
+        self.sleep = sleeper
 
     # --- служебное ----------------------------------------------------------
 
@@ -134,7 +137,12 @@ class MaxReceiver(Receiver):
     # --- ответ --------------------------------------------------------------
 
     def send(self, chat_id: int, text: str) -> None:
-        for part in chunk(text, self.limit):
+        parts = chunk(text, self.limit)
+        for number, part in enumerate(parts):
+            if number:
+                # Max принимает не больше двух сообщений в секунду в один чат
+                # (проверено живым ботом: перебор отвечает 429 too.many.requests).
+                self.sleep(SEND_PAUSE)
             self.session.post(BASE + "/messages", params={"chat_id": chat_id},
                               json={"text": part}, headers=self.headers,
                               verify=self.verify, timeout=60)

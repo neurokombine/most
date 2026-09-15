@@ -124,3 +124,15 @@ def test_token_is_never_printed_in_an_error(store):
     with pytest.raises(TokenRejected) as exc:
         r.poll_once()
     assert "max-token" not in str(exc.value)
+
+
+def test_long_answer_is_sent_at_the_pace_max_allows(store):
+    """Max принимает не больше двух сообщений в секунду в один чат:
+    длинный ответ шлём с паузой, иначе хвост потеряется на 429."""
+    session = FakeSession([FakeResponse(200, {"message": {}})] * 3)
+    slept = []
+    r = MaxReceiver(token="max-token", store=store, session=session, sleeper=slept.append)
+    r.send(900, "я" * 9000)
+    assert len(session.calls) == 3
+    assert len(slept) == 2                    # пауза между кусками, не после последнего
+    assert all(s >= 0.5 for s in slept)

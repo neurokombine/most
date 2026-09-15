@@ -83,6 +83,10 @@ def check_claude(claude_bin: str | None = None) -> Check:
 
 def check_network(channel: str, session=None, token: str = "") -> Check:
     """Живая ли дорога до мессенджера. Токен в текст не попадает никогда."""
+    if not (token or "").strip():
+        return Check(False, f"токен {channel} не вписан в настройки",
+                     "возьмите токен у @BotFather (Telegram) или у @MasterBot (Max) "
+                     "и впишите его в config.yaml")
     session = session or requests.Session()
     url = PROBE[channel].format(token=token)
     kwargs = {"timeout": 20}

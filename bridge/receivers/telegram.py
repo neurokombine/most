@@ -51,7 +51,8 @@ class TelegramReceiver(Receiver):
 
         if resp.status_code == 409:
             raise BridgeConflict("на бота уже кто-то подписан (вебхук или второй мост)")
-        if resp.status_code in (401, 403):
+        if resp.status_code in (401, 403, 404):
+            # 404 — адреса такого бота не существует: токен пустой или битый.
             raise TokenRejected(f"Telegram не признал токен ({resp.status_code})")
         if resp.status_code == 429:
             raise RateLimited("Telegram просит подождать", retry_after=_retry_after(resp))

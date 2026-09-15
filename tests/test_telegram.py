@@ -104,3 +104,11 @@ def test_token_is_never_printed_in_an_error(store):
     with pytest.raises(TokenRejected) as exc:
         r.poll_once()
     assert "123:abc" not in str(exc.value)
+
+
+def test_404_means_token_rejected_not_a_pause(store):
+    """Telegram отвечает 404 на несуществующий или пустой токен: адрес бота
+    просто не существует. Ждать тут нечего — это чинится руками."""
+    r = make(store, [FakeResponse(404, {"ok": False, "description": "Not Found"})])
+    with pytest.raises(TokenRejected):
+        r.poll_once()
