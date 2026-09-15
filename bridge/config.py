@@ -58,6 +58,10 @@ class VoiceConfig:
     piper_voice: str = voice.DEFAULT_PIPER_VOICE
     max_seconds: int = voice.MAX_SECONDS
     max_chars: int = voice.MAX_SPEAK_CHARS
+    # Через сколько минут простоя отпустить модель слуха. 0 — не отпускать
+    # никогда. Замер 15.09: с моделью в памяти мост держит 550 МБ вместо 37,
+    # а поднимается она обратно около двух секунд — на это и меняем.
+    unload_after_min: int = 30
     model_dir: Path = field(default_factory=lambda: DEFAULT_ROOT / "models" / "faster-whisper")
     voices_dir: Path = field(default_factory=lambda: DEFAULT_ROOT / "voices")
 
@@ -186,6 +190,7 @@ def _voice(raw, home: Path) -> VoiceConfig:
     settings.piper_voice = str(raw.get("piper_voice") or settings.piper_voice)
     settings.max_seconds = _int(raw.get("max_seconds"), voice.MAX_SECONDS, least=5)
     settings.max_chars = _int(raw.get("max_chars"), voice.MAX_SPEAK_CHARS, least=50)
+    settings.unload_after_min = _int(raw.get("unload_after_min"), 30, least=0)
     for key in ("model_dir", "voices_dir"):
         value = raw.get(key)
         if value:

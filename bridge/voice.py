@@ -18,10 +18,12 @@
 """
 from __future__ import annotations
 
+import gc
 import importlib.util
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -150,9 +152,24 @@ class Transcriber:
     def transcribe(self, path, max_seconds: int | None = MAX_SECONDS) -> str:
         raise VoiceNotSetUp("распознавание не настроено")
 
+    def release(self) -> bool:
+        """Отпустить модель. Отпускать нечего — значит, ничего и не делаем."""
+        return False
+
+    def release_if_idle(self, after_sec: float, now: float | None = None) -> bool:
+        return False
+
 
 class WhisperTranscriber(Transcriber):
-    """faster-whisper на процессоре. Модель загружается один раз и живёт в памяти."""
+    """faster-whisper на процессоре.
+
+    Модель поднимается при первом голосовом и живёт в памяти, пока ею
+    пользуются: поднимать её на каждую запись — это лишние секунды перед
+    каждым ответом. Но и держать вечно нельзя: после первого же голосового
+    мост тяжелеет с 37 МБ до 550 (замер на сервере 15.09), а на машине из
+    программы это половина свободной памяти. Поэтому после долгого простоя
+    модель отпускается — обратно она поднимается около двух секунд.
+    """
 
     name = "faster-whisper"
 
@@ -167,6 +184,7 @@ class WhisperTranscriber(Transcriber):
         self._loader = loader
         self._model = None
         self._broken = False
+        self._used_at = None        # когда модель в последний раз работала
 
     # --- готовность ---------------------------------------------------------
 
@@ -188,8 +206,31 @@ class WhisperTranscriber(Transcriber):
         # сотни мегабайт. Смотрим на библиотеку и на файл модели.
         return library_present() and self.model_on_disk()
 
+    def release(self) -> bool:
+        """Отпустить модель слуха. Возвращает, было ли что отпускать.
+
+        Библиотеки (`libctranslate2`) остаются в процессе — их из памяти уже
+        не выгнать. Уходят веса модели, а это основная её часть.
+        """
+        if self._model is None:
+            return False
+        self._model = None
+        self._used_at = None
+        gc.collect()
+        return True
+
+    def release_if_idle(self, after_sec: float, now: float | None = None) -> bool:
+        """Отпустить, если ею давно не пользовались. `after_sec` 0 — не отпускать."""
+        if self._model is None or not after_sec:
+            return False
+        now = time.monotonic() if now is None else now
+        if self._used_at is None or (now - self._used_at) < after_sec:
+            return False
+        return self.release()
+
     def _load(self):
         if self._model is not None:
+            self._used_at = time.monotonic()
             return self._model
         if self._broken:
             raise VoiceNotSetUp("распознавание не настроено")
@@ -198,6 +239,7 @@ class WhisperTranscriber(Transcriber):
         except Exception as exc:                           # noqa: BLE001
             self._broken = True
             raise VoiceNotSetUp(f"распознавание не поднялось: {exc}") from exc
+        self._used_at = time.monotonic()
         return self._model
 
     def _default_loader(self):
@@ -222,6 +264,8 @@ class WhisperTranscriber(Transcriber):
             raise VoiceTooLong("запись длиннее предела", seconds=seconds, limit=limit)
 
         said = [str(getattr(piece, "text", "")).strip() for piece in segments]
+        # Отметку ставим ПОСЛЕ работы: считаем простой от конца дела, а не от начала.
+        self._used_at = time.monotonic()
         return " ".join(part for part in said if part).strip()
 
 

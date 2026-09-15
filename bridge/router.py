@@ -218,6 +218,20 @@ class Router:
             voice=texts.HELP_VOICE_ON if self.hears() else texts.HELP_VOICE_OFF,
             voice_out=texts.HELP_VOICE_OUT_ON if self.speaks() else "")
 
+    def release_voice(self) -> bool:
+        """Отпустить модель слуха, если ею давно не пользовались.
+
+        Зовётся из холостого хода моста: пока никто не пишет, держать
+        полгигабайта незачем.
+        """
+        minutes = getattr(getattr(self.config, "voice", None), "unload_after_min", 30)
+        if not minutes:
+            return False
+        try:
+            return bool(self.ears.release_if_idle(minutes * 60))
+        except Exception:                                   # noqa: BLE001
+            return False
+
     def speaks(self) -> bool:
         """Умеет ли мост ответить вслух. Слух и голос ставятся вместе, но
         проверяются порознь: piper мог не скачаться, а whisper встать."""

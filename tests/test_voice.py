@@ -5,6 +5,8 @@
 Проверяем ровно то, что решает поведение моста: деградацию без библиотеки,
 предел длины, кириллицу и обрезку для озвучки.
 """
+import time
+
 import pytest
 
 from bridge import voice
@@ -227,3 +229,91 @@ def test_build_respects_the_switch_off(config):
     ears, mouth = voice.build(config)
     assert ears.available() is False
     assert mouth.available() is False
+
+
+# --- модель слуха не живёт в памяти вечно (замер сервера 15.09) --------------
+
+class ПоддельнаяМодель:
+    def transcribe(self, path, **kwargs):
+        class Инфо:
+            duration = 3.0
+        return [], Инфо()
+
+
+def подъёмник(счётчик):
+    def loader():
+        счётчик.append(1)
+        return ПоддельнаяМодель()
+    return loader
+
+
+def test_the_model_is_let_go_after_a_long_quiet(tmp_path):
+    """550 МБ против 37 — столько стоит модель, которую держат вечно."""
+    from bridge.voice import WhisperTranscriber
+
+    счётчик = []
+    ears = WhisperTranscriber(loader=подъёмник(счётчик))
+    ears.transcribe(tmp_path / "zapis.ogg")
+    assert счётчик == [1]
+
+    assert ears.release_if_idle(after_sec=1800, now=time.monotonic()) is False   # ещё рано
+    assert ears.release_if_idle(after_sec=1800, now=time.monotonic() + 1801) is True
+    assert ears._model is None
+
+
+def test_it_comes_back_by_itself_on_the_next_voice(tmp_path):
+    """Отпустили — и человек этого не замечает, кроме пары секунд ожидания."""
+    from bridge.voice import WhisperTranscriber
+
+    счётчик = []
+    ears = WhisperTranscriber(loader=подъёмник(счётчик))
+    ears.transcribe(tmp_path / "raz.ogg")
+    ears.release()
+    ears.transcribe(tmp_path / "dva.ogg")
+    assert счётчик == [1, 1]                       # поднялась второй раз, сама
+
+
+def test_a_busy_bridge_does_not_lose_its_model(tmp_path):
+    """Простой считается от конца работы, а не от начала."""
+    from bridge.voice import WhisperTranscriber
+
+    ears = WhisperTranscriber(loader=подъёмник([]))
+    ears.transcribe(tmp_path / "raz.ogg")
+    assert ears.release_if_idle(after_sec=60, now=time.monotonic() + 30) is False
+
+
+def test_zero_means_never_let_it_go(tmp_path):
+    """Кому память не жалко, тот платит секундами — и это его право."""
+    from bridge.voice import WhisperTranscriber
+
+    ears = WhisperTranscriber(loader=подъёмник([]))
+    ears.transcribe(tmp_path / "raz.ogg")
+    assert ears.release_if_idle(after_sec=0, now=time.monotonic() + 100000) is False
+    assert ears._model is not None
+
+
+def test_there_is_nothing_to_let_go_when_the_voice_is_not_set_up():
+    from bridge.voice import Transcriber
+
+    глухой = Transcriber()
+    assert глухой.release() is False
+    assert глухой.release_if_idle(after_sec=1) is False
+
+
+def test_the_setting_is_read_and_zero_survives(home):
+    """`0` — это «никогда», а не «не сказано»: его нельзя подменять умолчанием."""
+    from bridge.config import load_config
+
+    (home / "config.yaml").write_text(
+        'telegram:\n  token: "t"\n  allowlist: []\nvoice:\n  unload_after_min: 0\n',
+        encoding="utf-8")
+    assert load_config(home=home, name="test").voice.unload_after_min == 0
+
+    (home / "config.yaml").write_text(
+        'telegram:\n  token: "t"\n  allowlist: []\nvoice:\n  unload_after_min: 5\n',
+        encoding="utf-8")
+    assert load_config(home=home, name="test").voice.unload_after_min == 5
+
+    (home / "config.yaml").write_text(
+        'telegram:\n  token: "t"\n  allowlist: []\n', encoding="utf-8")
+    assert load_config(home=home, name="test").voice.unload_after_min == 30
