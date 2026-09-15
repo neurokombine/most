@@ -53,8 +53,13 @@ max:
   allowlist: []      # ваши Max user_id
 
 projects_dir: "$HOME/projects"
-executor: claude
-timeout_sec: 900
+
+executor:
+  kind: claude
+  model: sonnet        # какой моделью работать: sonnet дешевле, opus умнее
+  parallel: 1          # сколько задач вести одновременно; на 4 ГБ памяти — одна
+  timeout_sec: 900     # бюджет времени на одну работу, 900 с = 15 минут
+  extra_args: []       # доводы для claude; см. README, раздел «Настройки»
 YAML
   echo "[установка] завёл настройки: $HOME_DIR/config.yaml"
 else
