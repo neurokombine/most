@@ -26,7 +26,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import narrator
+from . import alarm, narrator
 from .receivers.base import mask
 
 DEFAULT_TIMEOUT = 900        # бюджет времени на одну работу: 15 минут
@@ -213,7 +213,9 @@ class ClaudeExecutor(Executor):
         return mask(text, self.secrets)
 
     def _new_job_dir(self) -> tuple[str, Path]:
-        job_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        # Имя папки журнала — по московским часам, как и всё остальное время
+        # моста: иначе на амстердамской машине «утренняя» работа ляжет вчерашним днём.
+        job_id = alarm.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         job_dir = self.jobs_dir / job_id
         job_dir.mkdir(parents=True, exist_ok=True)
         return job_id, job_dir
@@ -230,7 +232,7 @@ class ClaudeExecutor(Executor):
         (job_dir / "prompt.md").write_text(self._mask(prompt), encoding="utf-8")
         meta = {"id": job_id, "session_id": session_id, "workdir": str(workdir),
                 "resumed": bool(resume), "model": self.model,
-                "started_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "pid": None}
+                "started_at": alarm.now().isoformat(timespec="seconds"), "pid": None}
         _write_json(job_dir / "meta.json", meta)
 
         # Первый вызов заводит сессию своим id, второй её продолжает.
@@ -295,7 +297,7 @@ class ClaudeExecutor(Executor):
         events = narrator.parse_stream(raw)
         err_tail = self._mask(err_path.read_text(encoding="utf-8", errors="replace").strip())[-ERR_TAIL:]
 
-        meta["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        meta["finished_at"] = alarm.now().isoformat(timespec="seconds")
         meta["exit_code"] = mark
         _write_json(job_dir / "meta.json", meta)
 

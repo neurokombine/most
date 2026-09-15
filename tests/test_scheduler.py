@@ -101,16 +101,19 @@ def test_a_switched_off_task_stays_quiet(alarm_clock, link, pool, store):
     assert pool.running() == 0
 
 
-def test_busy_hands_postpone_the_run_instead_of_losing_it(alarm_clock, link, pool, store):
+def test_busy_hands_postpone_the_run_instead_of_losing_it(config, store, postbox, link):
     """Мост занят разговором — задача подождёт полминуты, а не пропадёт."""
-    task = a_task(alarm_clock, link, when=msk(2026, 9, 16, 7, 30))
-    pool.submit(link=store.get_link_by_id(link["id"]), channel="telegram", chat_id=100,
+    slow = WorkPool(executor=FakeExecutor(text="…", delay=5), store=store, max_parallel=1)
+    clock = Scheduler(config=config, store=store, pool=slow, postbox=postbox)
+    task = a_task(clock, link, when=msk(2026, 9, 16, 7, 30))
+    slow.submit(link=store.get_link_by_id(link["id"]), channel="telegram", chat_id=100,
                 prompt="ручная задача", workdir="/tmp", thread_id=0)
 
-    assert alarm_clock.tick(now=msk(2026, 9, 16, 7, 30)) == 0
+    assert clock.tick(now=msk(2026, 9, 16, 7, 30)) == 0
     assert alarm.from_iso(store.get_schedule(task["id"])["next_run_at"]) == \
         msk(2026, 9, 16, 7, 30)
-    pool.wait_idle(timeout=5)
+    slow.stop_all()
+    slow.wait_idle(timeout=5)
 
 
 # --- мост был выключен ------------------------------------------------------

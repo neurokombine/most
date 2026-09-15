@@ -91,6 +91,12 @@ TIME_DIGIT_RE = re.compile(r"\bв\s+(\d{1,2})(?:\s*час\w*)?(?:\s+(" + PART_OF
 TIME_WORD_RE = re.compile(r"\bв\s+(" + "|".join(NUMBER_WORDS) + r")(?:\s*час\w*)?"
                           r"(?:\s+(" + PART_OF_DAY + r"))?\b", re.IGNORECASE)
 
+# Отдельные часы для «поменяй время задачи 2 на 8:00»: здесь предлог другой,
+# а в разборе целой фразы «на 5 страниц» временем притворяться не должно.
+NEW_TIME_RE = re.compile(r"(?:^|\s)(?:на|в|к)?\s*(\d{1,2})[:.](\d{2})(?:\s|$)")
+NEW_HOUR_RE = re.compile(r"(?:^|\s)(?:на|в|к)\s*(\d{1,2})(?:\s*час\w*)?"
+                         r"(?:\s+(" + PART_OF_DAY + r"))?(?:\s|$)", re.IGNORECASE)
+
 _warned: set[str] = set()
 
 
@@ -257,6 +263,20 @@ def parse(text: str) -> tuple[Spec | None, str]:
     spans.append(time_span)
 
     return Spec(kind, hour, minute, weekday), _without(raw, spans)
+
+
+def parse_time(text: str) -> tuple[int, int] | None:
+    """Только время: «на 8:00», «в 8 утра», «8:00». Не разобрали — None."""
+    low = _flatten(text)
+    exact = NEW_TIME_RE.search(low)
+    if exact is not None:
+        hour, minute = int(exact.group(1)), int(exact.group(2))
+        return (hour, minute) if _sane(hour, minute) else None
+    hour_only = NEW_HOUR_RE.search(low)
+    if hour_only is not None:
+        hour = _to_24(int(hour_only.group(1)), (hour_only.group(2) or "").lower(), False)
+        return (hour, 0) if _sane(hour, 0) else None
+    return None
 
 
 def _flatten(text: str) -> str:
@@ -473,7 +493,7 @@ class Scheduler:
             if self.launch(row, spec=spec, now=now) is None:
                 continue                  # руки заняты — вернёмся через полминуты
             if late > LATE_GRACE:
-                self._say(texts.SCHEDULE_LATE.format(
+                self.announce(texts.SCHEDULE_LATE.format(
                     number=row["id"], when=clock_face(spec.hour, spec.minute)))
             started += 1
         return started
@@ -575,7 +595,7 @@ class Scheduler:
             # Первое утро после установки: суток за спиной ещё нет, считать нечего.
             self.store.set_setting(SUMMARY_KEY, today)
             return 0
-        if not self._say(self.summary_text(now)):
+        if not self.announce(self.summary_text(now)):
             return 0                     # сказать было некому — скажем, когда будет
         self.store.set_setting(SUMMARY_KEY, today)
         return 1
@@ -630,7 +650,7 @@ class Scheduler:
 
     # --- сказать во все каналы -------------------------------------------------
 
-    def _say(self, text: str, aloud: bool = True) -> int:
+    def announce(self, text: str, aloud: bool = True) -> int:
         if not text or self.postbox is None:
             return 0
         try:

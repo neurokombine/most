@@ -22,12 +22,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import changes, narrator, postman, texts, voice
+from . import alarm, changes, narrator, postman, texts, voice
 from .executor import Executor
 from .receivers.base import FileTooBig, Incoming, mask
 from .works import WorkPool
 
-MOSCOW = timezone(timedelta(hours=3))
+# Пояс читается через zoneinfo (alarm.zone); запасной путь — те же +3.
+MOSCOW = alarm.zone()
 
 LIMITS = {"telegram": narrator.TELEGRAM_LIMIT, "max": narrator.MAX_LIMIT}
 CHANNEL_NAMES = {"telegram": "телеграм", "max": "Max"}
@@ -67,6 +68,24 @@ FILE_STOPWORDS = {"мне", "сюда", "нам", "файл", "файлик", "�
 # А эти — вовсе не про файлы: «пришли ответ целиком ещё раз» — это про сообщение.
 NOT_A_FILE = {"ответ", "ответы", "сообщение", "сообщения", "текст", "смс", "письмо"}
 HELP_RE = re.compile(r"^\s*(?:/?help|/start|помощь|что\s+ты\s+умеешь)\s*$", re.IGNORECASE)
+
+# --- этап 5: расписание -----------------------------------------------------
+# Сама фраза «каждое утро в 7:30 …» разбирается в alarm.py; здесь — команды
+# вокруг неё. Номер задачи — это её номер в базе, он не съезжает после того,
+# как соседнюю убрали.
+SCHEDULE_SHOW_RE = re.compile(r"расписани", re.IGNORECASE)
+SCHEDULE_REMOVE_RE = re.compile(r"^\s*(?:убери|удали|сотри|отмени)\s+задачу\s+(?P<n>\d+)",
+                                re.IGNORECASE)
+SCHEDULE_OFF_RE = re.compile(r"^\s*(?:выключи|приостанови|останови)\s+задачу\s+(?P<n>\d+)",
+                             re.IGNORECASE)
+SCHEDULE_ON_RE = re.compile(r"^\s*(?:включи|верни)\s+задачу\s+(?P<n>\d+)", re.IGNORECASE)
+SCHEDULE_TIME_RE = re.compile(r"(?:помен|перенес|сдвинь|поставь).{0,30}?"
+                              r"задач\w*\s+(?P<n>\d+)\s+на\s+(?P<time>.+)$", re.IGNORECASE)
+SCHEDULE_RUN_RE = re.compile(r"запусти\s+задачу\s+(?P<n>\d+)", re.IGNORECASE)
+NIGHT_RE = re.compile(r"что\s+(?:ты\s+)?запускал|запускал\w*\s+ночью|"
+                      r"что\s+было\s+ночью|по\s+расписанию\s+за\s+сутки", re.IGNORECASE)
+SUMMARY_NOW_RE = re.compile(r"(?:пришли|покажи|дай|сделай|собери)\s+(?:мне\s+)?сводку|"
+                            r"сводку\s+(?:сейчас|прямо\s+сейчас)", re.IGNORECASE)
 
 # --- голос ------------------------------------------------------------------
 # Что считаем записанной речью, а не файлом: голосовое Telegram, кружок и
@@ -121,7 +140,7 @@ def how_long(seconds) -> str:
 
 class Router:
     def __init__(self, config, store, executor: Executor, pool: WorkPool | None = None,
-                 postbox=None, ears=None, mouth=None):
+                 postbox=None, ears=None, mouth=None, scheduler=None):
         self.config = config
         self.store = store
         self.executor = executor
@@ -135,6 +154,10 @@ class Router:
         self.postbox = postbox
         self.pool = pool or WorkPool(executor=executor, store=store,
                                      max_parallel=getattr(config, "parallel", 1))
+        # Будильник берёт ту же очередь работ: своей заводить нельзя, иначе
+        # в одной папке окажутся две нейросети, а «стоп» погасит только одну.
+        self.alarm = scheduler or alarm.Scheduler(config=config, store=store,
+                                                  pool=self.pool, postbox=postbox)
 
     def _mask(self, text) -> str:
         """Ни один текст беды не уходит в журнал с токеном внутри.
@@ -207,6 +230,9 @@ class Router:
             return narrator.chunk(self._stop(incoming), limit)
         if NEW_SESSION_RE.search(text):
             return narrator.chunk(self._new_session(incoming), limit)
+        schedule = self._schedule_words(incoming, text, limit)
+        if schedule is not None:
+            return schedule
         if CHANGES_RE.search(text):
             return narrator.chunk(self._changes(incoming), limit)
         if HISTORY_RE.search(text):
@@ -271,11 +297,32 @@ class Router:
         return (incoming.channel, int(incoming.chat_id), int(incoming.thread_id))
 
     def _stop(self, incoming: Incoming) -> str:
-        """«Стоп»: гасим работу. Ответ «остановила» придёт от самой работы."""
-        work = self.pool.stop(self.key_of(incoming))
-        if work is None:
+        """«Стоп»: гасим работу этого чата — и ночную в той же папке.
+
+        Находка этапа 2: «стоп» останавливал только работу своей связки.
+        Задачу расписания завели в одном мессенджере, «стоп» сказали в другом —
+        и она продолжала жечь подписку. Человек видит папку, а не ключи связок,
+        поэтому гасим по папке и вслух называем, что именно остановили.
+        """
+        key = self.key_of(incoming)
+        mine = self.pool.stop(key)
+        _link, workdir = self._workdir_of(incoming)
+        others = self.pool.stop_in_dir(workdir, skip=key) if workdir else []
+
+        if mine is None and not others:
             return texts.STOP_NOTHING_TO_STOP
-        return ""          # молчим: через секунду придёт «остановила» и что успела
+        if not others:
+            return ""      # молчим: через секунду придёт «остановила» и что успела
+
+        lines = [texts.STOP_WHAT_HEADER]
+        if mine is not None:
+            lines.append(texts.STOP_LINE_MINE.format(prompt=(mine.prompt or "")[:60]))
+        for work in others:
+            meta = work.meta or {}
+            lines.append(texts.STOP_LINE_SCHEDULE.format(
+                number=meta.get("schedule_id", "?"),
+                prompt=(meta.get("schedule_prompt") or work.prompt or "")[:60]))
+        return "\n".join(lines)
 
     def _new_session(self, incoming: Incoming) -> str:
         link = self._link_with_project(incoming)
@@ -341,6 +388,137 @@ class Router:
                 outcome=texts.JOB_OUTCOME.get(row["state"], row["state"]),
                 prompt=(row["prompt_head"] or "")[:60]))
         return "\n".join(lines)
+
+    # --- этап 5: расписание словами -----------------------------------------
+
+    def _schedule_words(self, incoming: Incoming, text: str, limit: int):
+        """Всё про расписание в одном месте. None — значит, это не про него.
+
+        Порядок важен: сначала постановка задачи («каждое утро в 7:30 …»),
+        потом команды вокруг неё. Иначе «поставь на расписание: каждый день…»
+        показало бы список вместо того, чтобы завести задачу.
+        """
+        if alarm.looks_like_schedule(text):
+            return narrator.chunk(self._schedule_add(incoming, text), limit)
+
+        for pattern, handler in (
+            (SCHEDULE_REMOVE_RE, self._schedule_remove),
+            (SCHEDULE_OFF_RE, lambda n: self._schedule_switch(n, False)),
+            (SCHEDULE_ON_RE, lambda n: self._schedule_switch(n, True)),
+            (SCHEDULE_RUN_RE, self._schedule_run),
+        ):
+            found = pattern.search(text)
+            if found:
+                return narrator.chunk(handler(int(found.group("n"))), limit)
+
+        moved = SCHEDULE_TIME_RE.search(text)
+        if moved:
+            return narrator.chunk(
+                self._schedule_move(int(moved.group("n")), moved.group("time")), limit)
+
+        if NIGHT_RE.search(text):
+            return narrator.chunk(self.alarm.night_text(), limit)
+        if SUMMARY_NOW_RE.search(text):
+            return narrator.chunk(self._summary_now(), limit)
+        if SCHEDULE_SHOW_RE.search(text):
+            return narrator.chunk(self._schedule_list(), limit)
+        return None
+
+    def _schedule_add(self, incoming: Incoming, text: str) -> str:
+        link = self._link_with_project(incoming)
+        if link is None:
+            return texts.PROJECT_NONE
+
+        spec, prompt = alarm.parse(text)
+        if spec is None:
+            # Переспрашиваем одной фразой с примером — гадать, что человек имел
+            # в виду, в расписании нельзя: ошибка вылезет ночью и молча.
+            return texts.SCHEDULE_NOT_UNDERSTOOD
+        if not prompt:
+            return texts.SCHEDULE_NO_PROMPT
+
+        row = self.alarm.add(link, spec, prompt, project=link["project"])
+        return texts.SCHEDULE_ADDED.format(
+            number=row["id"], when=spec.human(), prompt=prompt,
+            project=link["project"], next=self._when_of(row))
+
+    def _schedule_list(self) -> str:
+        rows = self.store.list_schedule()
+        if not rows:
+            return texts.SCHEDULE_EMPTY
+        lines = [texts.SCHEDULE_HEADER]
+        for row in rows:
+            spec = alarm.Spec.stored(row["spec"])
+            when = spec.human() if spec else row["spec"]
+            shape = texts.SCHEDULE_LINE if row["enabled"] else texts.SCHEDULE_LINE_OFF
+            lines.append(shape.format(number=row["id"], when=when,
+                                      next=self._when_of(row),
+                                      prompt=(row["prompt"] or "")[:60]))
+        lines.append("")
+        lines.append(texts.SCHEDULE_FOOTER)
+        return "\n".join(lines)
+
+    def _schedule_remove(self, number: int) -> str:
+        row = self.store.get_schedule(number)
+        if row is None:
+            return texts.SCHEDULE_NO_SUCH.format(number=number)
+        spec = alarm.Spec.stored(row["spec"])
+        self.store.remove_schedule(number)
+        return texts.SCHEDULE_REMOVED.format(
+            number=number, when=spec.human() if spec else row["spec"])
+
+    def _schedule_switch(self, number: int, on: bool) -> str:
+        row = self.store.get_schedule(number)
+        if row is None:
+            return texts.SCHEDULE_NO_SUCH.format(number=number)
+        self.store.enable_schedule(number, on)
+        if not on:
+            return texts.SCHEDULE_SWITCHED_OFF.format(number=number)
+        spec = alarm.Spec.stored(row["spec"])
+        if spec is not None:
+            self.store.set_schedule_next(
+                number, alarm.to_iso(alarm.next_run(spec, self.alarm.now(), self.alarm.tz)))
+        return texts.SCHEDULE_SWITCHED_ON.format(
+            number=number, next=self._when_of(self.store.get_schedule(number)))
+
+    def _schedule_move(self, number: int, raw_time: str) -> str:
+        row = self.store.get_schedule(number)
+        if row is None:
+            return texts.SCHEDULE_NO_SUCH.format(number=number)
+        clock = alarm.parse_time(raw_time)
+        if clock is None:
+            return texts.SCHEDULE_TIME_UNCLEAR.format(number=number)
+
+        spec = alarm.Spec.stored(row["spec"])
+        if spec is None:
+            return texts.SCHEDULE_NO_SUCH.format(number=number)
+        moved = alarm.Spec(spec.kind, clock[0], clock[1], spec.weekday)
+        self.store.set_schedule_spec(
+            number, moved.to_stored(),
+            next_run_at=alarm.to_iso(alarm.next_run(moved, self.alarm.now(), self.alarm.tz)))
+        return texts.SCHEDULE_MOVED.format(
+            number=number, when=moved.human(),
+            next=self._when_of(self.store.get_schedule(number)))
+
+    def _schedule_run(self, number: int) -> str:
+        """«Запусти задачу 2 сейчас» — проверка руками, расписание не двигается."""
+        row = self.store.get_schedule(number)
+        if row is None:
+            return texts.SCHEDULE_NO_SUCH.format(number=number)
+        if self.alarm.launch(row, move_next=False) is None:
+            return texts.SCHEDULE_RUN_BUSY
+        return texts.SCHEDULE_RUN_NOW.format(number=number)
+
+    def _summary_now(self) -> str:
+        """Сводка по просьбе. Ушла во все каналы — в этом чате молчим."""
+        text = self.alarm.summary_text(self.alarm.now())
+        if self.postbox is not None and self.alarm.announce(text):
+            return ""
+        return text
+
+    def _when_of(self, row) -> str:
+        when = alarm.from_iso(row["next_run_at"], self.alarm.tz) if row["next_run_at"] else None
+        return alarm.when_text(when, self.alarm.tz) if when else "—"
 
     # --- этап 3: файлы туда и обратно ---------------------------------------
 

@@ -53,6 +53,10 @@ class Bridge:
         # Роутеру нужен почтовый ящик, чтобы «отдай» ушло во все мессенджеры.
         if getattr(self.router, "postbox", None) is None:
             self.router.postbox = self
+        # Будильник живёт в главном цикле и говорит через тот же ящик: отчёт
+        # о ночной работе — это то, что мост присылает сам, значит, во все каналы.
+        self.alarm = self.router.alarm
+        self.alarm.postbox = self
         self._fingerprint = _code_fingerprint()
 
     # --- состояние ----------------------------------------------------------
@@ -105,8 +109,19 @@ class Bridge:
                 handled += 1
                 self._answer(receiver, message)
 
+        # Часы смотрим каждым заходом цикла, но сам будильник просыпается
+        # не чаще, чем раз в полминуты: разбудить его чаще — гонять базу зря.
+        handled += self._look_at_the_clock()
         handled += self.deliver()
         return handled
+
+    def _look_at_the_clock(self) -> int:
+        try:
+            return self.alarm.tick()
+        except Exception as exc:                            # noqa: BLE001
+            # Расписание не имеет права ронять разговор в чате.
+            self.store.note("error", text=self._mask(f"будильник споткнулся: {exc}")[:200])
+            return 0
 
     # --- готовые работы -----------------------------------------------------
 
@@ -118,6 +133,12 @@ class Bridge:
         """
         delivered = 0
         for work in self.pool.collect():
+            if (work.meta or {}).get("schedule_id"):
+                # Работа по расписанию отчитывается во все каналы, а не в тот
+                # чат, где задачу однажды завели: тишина ответом не считается.
+                self._report_scheduled(work)
+                delivered += 1
+                continue
             receiver = self.receivers.get(work.channel)
             if receiver is None:
                 continue
@@ -139,6 +160,18 @@ class Bridge:
             self._say_all(receiver, work.channel, work.chat_id, extra)
             delivered += 1
         return delivered
+
+    def _report_scheduled(self, work) -> None:
+        """Обязательный отчёт о ночной работе. Каналов нет — молча в журнал."""
+        try:
+            text = self.alarm.report(work)
+        except Exception as exc:                            # noqa: BLE001
+            text = texts.WORK_FAILED.format(error=self._mask(str(exc)))
+        try:
+            if not self.broadcast(text, aloud=True):
+                self.store.note("schedule", text=text[:200])
+        except Exception as exc:                            # noqa: BLE001
+            self.store.note("error", text=self._mask(f"не отчитался о работе: {exc}")[:200])
 
     def _say_all(self, receiver, channel: str, chat_id: int, answers) -> bool:
         """Отправляет готовые куски в чат. False — значит, канал не принял."""
