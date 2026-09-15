@@ -604,3 +604,27 @@ def test_the_token_never_reaches_the_journal_when_taking_a_file(router, store, c
     router.handle(with_file(), receiver=receiver)
     written = "\n".join(str(row["text"]) for row in store.recent_journal())
     assert config.telegram.token not in written
+
+
+# --- фразы урока Б.6: как их произносят на камеру ---------------------------
+# Эти три строки взяты из съёмочного листа и из промта ученика. Пока их не было
+# в разборе словами, мост отправлял их нейросети как задачу — то есть жёг
+# подписку на команду, которую умеет сам.
+
+def test_a_folder_is_switched_even_with_a_lead_in_word_and_a_full_stop(router, store):
+    answers = router.handle(tg("Дальше работаем с папкой buhgalter."))
+    assert "buhgalter" in "\n".join(answers)
+    assert store.get_link("telegram", 500, 0)["project"] == "buhgalter"
+
+
+def test_projects_are_listed_when_asked_in_plain_words(router):
+    for said in ("Покажи, какие у меня есть папки.",
+                 "какие у меня папки",
+                 "какие есть проекты"):
+        text = "\n".join(router.handle(tg(said)))
+        assert "buhgalter" in text and "analitika" in text, said
+
+
+def test_asking_for_the_summary_is_not_a_request_for_a_file(router):
+    text = "\n".join(router.handle(tg("пришли сводку")))
+    assert "нет ни одного файла" not in text
