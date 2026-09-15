@@ -320,8 +320,8 @@ class Router:
             parts.append(texts.STOPPED_BY_HAND)
             parts.append(self._managed(result))
         elif result.timed_out:
-            minutes = max(1, int(getattr(self.executor, "timeout", 900) // 60))
-            parts.append(texts.WORK_TIMED_OUT.format(minutes=minutes))
+            budget = how_long(getattr(self.executor, "timeout", 900))
+            parts.append(texts.WORK_TIMED_OUT.format(budget=budget))
             parts.append(self._managed(result))
         elif not result.ok:
             self.store.note("error", channel=work.channel, chat_id=work.chat_id,

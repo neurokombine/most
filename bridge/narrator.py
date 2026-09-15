@@ -77,15 +77,35 @@ def final_text(events: list[dict]) -> str:
     return texts.WORK_EMPTY_ANSWER
 
 
+def delta_text(events: list[dict]) -> str:
+    """Текст, собранный из живых кусочков (`--include-partial-messages`).
+
+    Работу оборвали на полуслове — законченной реплики в потоке нет вовсе,
+    а кусочки есть. Только по ним и можно сказать, что она успела.
+    """
+    pieces = []
+    for event in events:
+        if event.get("type") != "stream_event":
+            continue
+        inner = event.get("event") or {}
+        if inner.get("type") != "content_block_delta":
+            continue
+        delta = inner.get("delta") or {}
+        if delta.get("type") == "text_delta" and delta.get("text"):
+            pieces.append(delta["text"])
+    return "".join(pieces).strip()
+
+
 def partial_text(events: list[dict], limit: int = 1500) -> str:
-    """Что нейросеть успела сказать до остановки: её реплики по ходу работы.
+    """Что нейросеть успела сказать до остановки.
 
     Нужно там, где итога нет вовсе, — «стоп» и упёршийся бюджет времени.
     """
-    said = [t for t in assistant_texts(events) if t]
-    if not said:
+    said = "\n\n".join(t for t in assistant_texts(events) if t).strip()
+    live = delta_text(events)
+    out = live if len(live) > len(said) else said
+    if not out:
         return ""
-    out = "\n\n".join(said).strip()
     return out if len(out) <= limit else out[:limit].rstrip() + "…"
 
 

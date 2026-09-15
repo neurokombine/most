@@ -270,3 +270,11 @@ def test_fake_executor_can_pretend_the_session_is_lost(tmp_path):
     result = fake.run("два", tmp_path, session_id="s-1", resume=True)
     assert result.session_lost is True
     assert fake.calls[0]["resume"] is True
+
+
+def test_partial_messages_are_asked_for_so_that_stop_has_something_to_show(tmp_path):
+    work = tmp_path / "project"
+    work.mkdir()
+    ex = ClaudeExecutor(jobs_dir=tmp_path / "jobs", claude_bin=stub(tmp_path, ARGS_STUB))
+    result = ex.run("раз", work)
+    assert "--include-partial-messages" in result.text

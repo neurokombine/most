@@ -301,3 +301,12 @@ def test_what_did_you_do_shows_the_last_five_works(router, store):
 
 def test_what_did_you_do_on_an_empty_chat_is_honest(router):
     assert "ещё ничего не делала" in "\n".join(router.handle(tg("что ты делала")))
+
+
+def test_short_budget_is_told_in_seconds_not_in_one_minute(config, store):
+    store.sync_allowlist("telegram", [111])
+    executor = FakeExecutor(delay=60, timeout=10, partial="Начала.")
+    r = Router(config=config, store=store, executor=executor)
+    text = "\n".join(done(r, tg("посчитай")))
+    assert "за 10 с" in text
+    assert "1 мин" not in text

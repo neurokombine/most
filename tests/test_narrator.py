@@ -86,3 +86,32 @@ def test_max_limit_is_smaller_than_telegram():
     parts = chunk("я" * 4050, MAX_LIMIT)
     assert all(len(p) <= MAX_LIMIT for p in parts)
     assert len(parts) == 2
+
+
+# --- этап 2: что нейросеть успела сказать до остановки -----------------------
+
+def test_partial_text_is_assembled_from_live_deltas(narrator=None):
+    from bridge import narrator
+    events = [
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": "Считаю "}}},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta", "text": "август"}}},
+    ]
+    assert narrator.partial_text(events) == "Считаю август"
+
+
+def test_partial_text_prefers_the_longer_of_delta_and_finished_reply():
+    from bridge import narrator
+    events = [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "Начала."}]}},
+        {"type": "stream_event", "event": {"type": "content_block_delta",
+                                           "delta": {"type": "text_delta",
+                                                     "text": "Начала. И посчитала август."}}},
+    ]
+    assert "август" in narrator.partial_text(events)
+
+
+def test_partial_text_of_an_empty_stream_is_empty():
+    from bridge import narrator
+    assert narrator.partial_text([]) == ""

@@ -36,6 +36,7 @@ DEFAULT_MODEL = "sonnet"     # по умолчанию не Opus: headless тя�
 # Признак того, что сессия не нашлась: id протух, папку ~/.claude вычистили,
 # работали на другой машине. Ловится и по тексту в потоке, и по stderr.
 SESSION_LOST_MARK = "No conversation found"
+FAKE_WAIT_CAP = 1.0          # дольше секунды подставной исполнитель не тянет
 
 # Что оставляем вложенному процессу. Всё прочее (включая CLAUDECODE*,
 # CLAUDE_CODE_ENTRYPOINT и любые ключи API) отрезаем.
@@ -163,7 +164,8 @@ class FakeExecutor(Executor):
 
         timed_out = False
         if self.delay:
-            waited = min(self.delay, self.timeout)
+            # Ждать по-настоящему незачем: тесту нужен сам исход, а не минуты.
+            waited = min(self.delay, self.timeout, FAKE_WAIT_CAP)
             stopped = handle.wait(waited) if handle is not None else bool(time.sleep(waited))
             if handle is not None and handle.cancelled:
                 return Result(ok=False, exit_code=None, session_id=session_id, job_id=job_id,
@@ -237,6 +239,9 @@ class ClaudeExecutor(Executor):
             "-p", prompt,
             "--output-format", "stream-json",
             "--verbose",
+            # Кусочки текста по ходу: без них у остановленной работы
+            # в журнале пусто и сказать «вот что успела» нечем.
+            "--include-partial-messages",
         ]
         cmd += ["--resume", session_id] if resume else ["--session-id", session_id]
         if self.model:
