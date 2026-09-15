@@ -212,13 +212,23 @@ def check_lock(config) -> Check:
                  f"(или вручную: python -m bridge --name {config.name})")
 
 
-def check_twins(config, lines=None, mine: int | None = None) -> Check:
+def check_twins(config, lines=None, mine: int | None = None,
+                holder: int | None = -1) -> Check:
     """Второй мост того же экземпляра — вторая причина молчания из трёх.
 
     Мессенджер отдаёт сообщения одному слушателю. Пока их двое, они отбирают
     сообщения друг у друга, и бот молчит через раз или молчит совсем.
+
+    Законный мост здесь ровно один — тот, что держит замок экземпляра. Доктора
+    зовут отдельной командой, своим процессом, и без этой поправки он считал
+    вторым мостом сам работающий мост и советовал его убить. На сервере это
+    выглядело так: `status` говорит «мост запущен, процесс 5539», а доктор
+    следом — «остановите лишний мост: kill 5539».
     """
-    twins = lock.other_bridges(config.name, mine=mine, lines=lines)
+    if holder == -1:
+        holder = lock.InstanceLock(Path(config.home) / "most.lock").holder_pid()
+    twins = [(pid, text) for pid, text in lock.other_bridges(config.name, mine=mine, lines=lines)
+             if pid != holder]
     if not twins:
         return Check(True, "второго моста с этим именем на машине нет")
     who = ", ".join(str(pid) for pid, _ in twins)

@@ -314,3 +314,28 @@ def test_the_free_question_about_the_login_does_not_wake_the_model(tmp_path):
     check_claude(str(binary), runner=runner)
     assert ["auth", "status"] == runner.calls[-1][-2:]
     assert all("-p" not in call for call in runner.calls)
+
+
+def test_the_running_bridge_is_not_its_own_twin(config, home):
+    """Доктор советовал убить тот самый мост, который работает. Найдено на сервере."""
+    from bridge.doctor import check_twins
+
+    rows = [f"5539 /home/u/most/.venv/bin/python -m bridge --name {config.name}"]
+    beda = check_twins(config, lines=rows, mine=9999, holder=None)
+    assert beda.ok is False                       # чужой мост — по-прежнему беда
+    assert "5539" in beda.what
+
+    свой = check_twins(config, lines=rows, mine=9999, holder=5539)
+    assert свой.ok is True                        # а свой же — нет
+    assert "нет" in свой.what
+
+
+def test_a_real_twin_is_still_found_next_to_the_running_bridge(config):
+    """Работающий мост прикрывает только себя, а не любого соседа."""
+    from bridge.doctor import check_twins
+
+    rows = [f"5539 /home/u/most/.venv/bin/python -m bridge --name {config.name}",
+            f"7100 /home/u/most/.venv/bin/python -m bridge --name {config.name}"]
+    check = check_twins(config, lines=rows, mine=9999, holder=5539)
+    assert check.ok is False
+    assert "7100" in check.what and "5539" not in check.what
