@@ -171,7 +171,7 @@ def check_lock(config) -> Check:
         return Check(True, f"мост запущен, процесс {pid}")
     return Check(True, "мост сейчас не запущен — это не поломка, но если бот молчит, "
                        "причина может быть в этом",
-                 f"запустите: systemctl --user start most@{config.name} "
+                 f"запустите: sudo systemctl start most@{config.name} "
                  f"(или вручную: python -m bridge --name {config.name})")
 
 

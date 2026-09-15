@@ -38,7 +38,7 @@ done
 
 case "$NAME" in
   *[!A-Za-z0-9_-]*)
-    echo "[установка] имя экземпляра «$NAME» не годится: только латиница, цифры, дефис"
+    echo "[установка] имя экземпляра «${NAME}» не годится: только латиница, цифры, дефис"
     echo "            имя попадает в имя службы most@<имя> и в путь ~/.most/<имя>"
     exit 1 ;;
 esac
@@ -141,7 +141,7 @@ YAML
 else
   echo "[установка] настройки уже есть: $HOME_DIR/config.yaml — не трогаю"
   if ! grep -q "projects_dir:.*$PROJECTS" "$HOME_DIR/config.yaml" 2>/dev/null; then
-    echo "            папка проектов в них своя; если нужна «$PROJECTS» — поправьте строку projects_dir"
+    echo "            папка проектов в них своя; если нужна «${PROJECTS}» — поправьте строку projects_dir"
   fi
 fi
 
@@ -173,7 +173,7 @@ PYCODE
       echo "[голос] ${PIPER_VOICE}$suffix уже есть — не качаю"
       continue
     fi
-    echo "[голос] скачиваю ${PIPER_VOICE}$suffix…"
+    echo "[голос] скачиваю ${PIPER_VOICE}${suffix}…"
     curl -fsSL "$BASE_URL/$SPEAKER/$QUALITY/${PIPER_VOICE}$suffix" -o "$target" || {
       echo "[голос] голос $PIPER_VOICE скачать не вышло — мост будет слушать, но отвечать текстом"
       rm -f "$target"

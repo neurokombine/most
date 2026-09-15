@@ -17,7 +17,7 @@ ALL = {name: value for name, value in vars(texts).items()
 # названия мессенджеров и программ. Всё остальное в русском тексте — жаргон.
 ALLOWED_LATIN = {
     "config", "yaml", "most", "bridge", "python", "m", "name", "claude", "bash",
-    "scripts", "setup", "sh", "voice", "chmod", "systemctl", "user", "start",
+    "scripts", "setup", "sh", "voice", "chmod", "systemctl", "sudo", "start",
     "restart", "telegram", "max", "botfather", "masterbot", "allow", "last",
     "deny", "knock", "who", "status", "doctor", "say", "allowlist", "enabled",
     "false", "true", "parallel", "timezone", "json", "kill", "timedatectl",
@@ -93,3 +93,27 @@ def test_every_trouble_says_what_to_do():
     for name in troubles:
         low = ALL[name].lower()
         assert any(word in low for word in doing), name
+
+
+# --- русский текст внутри shell-скриптов ------------------------------------
+
+def test_shell_scripts_wrap_substitutions_in_braces_before_russian_letters():
+    """Грабля, стоившая живого прогона дважды: «$NAME» внутри русской фразы.
+
+    Bash на части машин считает байты кириллицы и кавычек-ёлочек частью имени
+    переменной: «$NAME» читается как переменная NAME» — и скрипт падает
+    «unbound variable» ровно на той строке, где собирался объяснить человеку,
+    что не так. Лечится фигурными скобками: «${NAME}».
+    """
+    import re
+    from pathlib import Path
+
+    bare = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7f]")
+    scripts = sorted((Path(__file__).resolve().parent.parent / "scripts").glob("*.sh"))
+    assert scripts, "скриптов установки не нашлось — проверять нечего"
+    beda = []
+    for script in scripts:
+        for number, line in enumerate(script.read_text(encoding="utf-8").split("\n"), 1):
+            if bare.search(line):
+                beda.append(f"{script.name}:{number}: {line.strip()}")
+    assert not beda, "подстановка без скобок перед нелатинским знаком:\n" + "\n".join(beda)
